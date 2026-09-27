@@ -1457,6 +1457,48 @@ EOF
   pass "a captain outcome opens one sequence-keyed processing turn, survives empty and unrelated answers, is re-presented at run end and session start, and closes only on its acknowledgement"
 }
 
+test_large_unprocessed_backlog_replays_in_batches() {
+  local repo home out status
+  repo="$TMP_ROOT/large-backlog-root"
+  home="$TMP_ROOT/large-backlog-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, sentToMain, mainTools, outcomeScript, defaultSessionCtx, home }; })()`);
+const { fire, sentToMain, mainTools, outcomeScript, defaultSessionCtx, home } = globalThis.__t;
+import { writeFileSync, statSync, existsSync, readFileSync } from "node:fs";
+const summary = "a".repeat(4096);
+const rows = Array.from({ length: 320 }, (_, i) => JSON.stringify({ seq: i + 1, epoch: Math.floor(Date.now() / 1000), task: `backlog-${i + 1}`, wake: "", verdict: "captain", summary, silent: false, statusEndpoint: 0, statusIdent: "-" }));
+writeFileSync(`${home}/state/branch-outcomes.jsonl`, rows.join("\n") + "\n");
+writeFileSync(`${home}/state/.branch-outcomes-cursor`, "320\n");
+if (statSync(`${home}/state/branch-outcomes.jsonl`).size <= 1024 * 1024 || existsSync(`${home}/state/.branch-outcomes-processed`)) throw new Error("fixture is not a marker-less >1 MiB backlog");
+const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+await fire("session_start", {}, defaultSessionCtx);
+const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
+for (let start = 1; start <= 320; start += 32) {
+  const through = start + 31;
+  const listing = outcomeScript(["unprocessed"]);
+  if (Buffer.byteLength(listing) >= 1024 * 1024 || listing.split("\n").filter(Boolean).length !== 32) throw new Error(`store did not bound the batch starting at ${start}`);
+  const request = requests().at(-1);
+  if (!request || !request.message.content.includes(`[seq ${start}, recorded`) || !request.message.content.includes(`through=${through}`) || request.message.content.includes(`[seq ${through + 1},`)) throw new Error(`request did not present the batch starting at ${start}`);
+  if (Buffer.byteLength(request.message.content) >= 1024 * 1024) throw new Error("encoded request exceeded runner limit");
+  const ack = await processed.execute(`batch-${through}`, { through }, undefined, undefined, {});
+  if (ack.isError || readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() !== String(through)) throw new Error(`batch was not acknowledged through ${through}: ${JSON.stringify(ack)}`);
+  await fire("agent_start", {});
+  await fire("agent_end", {});
+  await fire("agent_settled", {});
+}
+if (outcomeScript(["unprocessed"]).trim() !== "") throw new Error("backlog was not fully processed");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "Pi must replay a marker-less >1 MiB backlog in sequence-bound batches: $out"
+  pass "Pi: a marker-less >1 MiB backlog is presented oldest first in bounded requests and continues after batch acknowledgement"
+}
+
 test_undated_unprocessed_outcome_surfaces_and_stays_unprocessed() {
   local repo home fake_root out status f
   repo="$TMP_ROOT/undated-outcome-root"
@@ -5641,6 +5683,7 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
+test_large_unprocessed_backlog_replays_in_batches
 test_undated_unprocessed_outcome_surfaces_and_stays_unprocessed
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_dispatch_routes_secondmate_signal_by_new_span

@@ -653,7 +653,7 @@ print_branch_outcomes_section() {
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
+    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state, including its still-open decisions listed above under OPEN DECISIONS, first and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
 "
     for line in "${captain_lines[@]}"; do
       text="$text$line

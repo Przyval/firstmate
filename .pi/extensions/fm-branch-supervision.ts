@@ -1049,8 +1049,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Present every unprocessed captain outcome to main as ONE sequence-keyed
-  // processing request. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
+  // Present the oldest bounded batch of unprocessed captain outcomes to main
+  // as one sequence-keyed processing request. After its acknowledgement the
+  // next run boundary presents the next batch. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
   // of a given sequence set open a turn of their own (queued as a follow-up
   // while main is busy); after that the request rides the captain's next
   // prompt instead, once per run, and a session replacement starts the

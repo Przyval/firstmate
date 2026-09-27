@@ -693,6 +693,27 @@ test_branch_outcomes_date_a_legacy_backlog_without_adopting_it() {
   pass "drain: a legacy backlog is presented with each outcome's age and a check-first instruction, never adopted"
 }
 
+# A newer settled branch line must not close an older keyed status decision.
+test_branch_ack_keeps_older_keyed_decision_open() {
+  local home drained
+  home="$TMP_ROOT/drain-older-decision"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/supervision-host"
+  printf 'needs-decision [key=merge-153]: merge PR 153 now or hold?\n' > "$home/state/held.status"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task held --verdict captain --summary 'needs merge decision' >/dev/null || fail "fixture: older outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task held --verdict captain --summary 'CI is now green' >/dev/null || fail "fixture: newer outcome"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" 'OPEN DECISIONS' "the status decision must appear in the first drain"
+  assert_contains "$drained" 'held [key=merge-153] needs-decision: merge PR 153 now or hold?' "the older decision must remain open"
+  assert_contains "$drained" '[seq 2, newest of 2 for this task' "the branch line must collapse to the newest outcome"
+  assert_contains "$drained" "including its still-open decisions listed above under OPEN DECISIONS" "the check-first instruction must include the older keyed decision"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 2 >/dev/null || fail "fixture: acknowledgement refused"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" 'held [key=merge-153] needs-decision: merge PR 153 now or hold?' "acknowledging the newer branch line closed the older keyed decision"
+  assert_not_contains "$drained" 'CI is now green' "acknowledged branch outcome repeated"
+  pass "drain: a keyed decision survives acknowledgement through a newer outcome for its task"
+}
+
 # A switch off Pi hands the drain an outcome the branch delivered but main
 # never acknowledged; it comes back with its age instead of as news, and is
 # still not adopted.
@@ -2188,6 +2209,7 @@ test_branch_outcomes_stay_unread_when_a_projection_fails
 test_branch_outcomes_stay_unread_without_jq
 test_branch_outcomes_stay_unread_when_the_drain_cannot_print
 test_branch_outcomes_date_a_legacy_backlog_without_adopting_it
+test_branch_ack_keeps_older_keyed_decision_open
 test_branch_outcomes_date_an_outcome_carried_across_a_switch_off_pi
 test_branch_outcomes_keep_an_unshown_outcome_until_acknowledged
 test_branch_outcomes_keep_a_drain_presented_outcome_across_a_switch_to_pi

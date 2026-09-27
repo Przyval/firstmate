@@ -74,7 +74,8 @@
 #     the host presents them in its drain.
 #   fm-branch-outcome.sh unprocessed
 #     Print every captain record that is read but not yet processed (JSONL,
-#     ascending seq, each with an added "recordedAgo"). Exit 0 with no output
+#     ascending seq, up to 32 per call, each with "recordedAgo"; long summaries
+#     are abbreviated for this processing view). Exit 0 with no output
 #     when none.
 #   fm-branch-outcome.sh mark-processed --through <seq>
 #     Advance the processed marker after main acknowledged the captain rows
@@ -385,8 +386,11 @@ print_unprocessed() {
     return 1
   fi
   [ -s "$STORE" ] || return 0
-  jq -c --argjson processed "$processed" --argjson cursor "$cursor" --argjson now "$(date +%s)" \
-    "$RECORDED_AGO_JQ"'select(.verdict == "captain" and .seq > $processed and .seq <= $cursor)
+  jq -cn --argjson processed "$processed" --argjson cursor "$cursor" --argjson now "$(date +%s)" \
+    "$RECORDED_AGO_JQ"'(reduce inputs as $row ([];
+        if length < 32 and $row.verdict == "captain" and $row.seq > $processed and $row.seq <= $cursor
+        then . + [$row] else . end))[]
+      | .summary |= (if length > 1024 then .[:1024] + "… [summary abbreviated]" else . end)
       | . + {recordedAgo: recorded_ago}' "$STORE"
 }
 
