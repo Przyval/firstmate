@@ -578,8 +578,8 @@ EOF
 #     (after a harness or posture switch, or an upgrade whose earlier
 #     presenter never advanced the read cursor), and the section asks main to
 #     check the task's current state first and reply to the captain only
-#     about outcomes still open, acknowledging settled ones as if they had
-#     never been listed.
+#     about outcomes still open, as if settled ones had never been listed,
+#     then acknowledge every presented outcome, settled and open alike.
 #   - Visible routine outcomes are listed once, for awareness, the way the Pi
 #     branch's routine notes reach main's transcript without a turn; silent
 #     routine outcomes never appear. The newest visible rows that fit a byte
