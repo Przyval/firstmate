@@ -207,8 +207,8 @@ type OutcomeRow = {
 };
 type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
 // An unprocessed captain row with the store's "recordedAgo" (bin/fm-branch-outcome.sh
-// owns its wording), or null when the store line carries none.
-type UnprocessedOutcome = OutcomeRow & { recordedAgo: string | null };
+// owns its wording).
+type UnprocessedOutcome = OutcomeRow & { recordedAgo: string };
 type ProviderRecovery = {
   cooldownMs: number;
   retryNotBefore: number;
@@ -1001,7 +1001,9 @@ export default function (pi: ExtensionAPI) {
 
   // Captain rows that are read (their visible entry exists) but not yet
   // acknowledged as processed by main, in sequence order. null means the store
-  // could not be read safely, never "nothing".
+  // could not be read safely, never "nothing". A listed line that breaks the
+  // store's contract, its age included, is reported to main as a visible note
+  // and every row stays unprocessed until the store is healthy again.
   async function readUnprocessedOutcomes(expectedGeneration: number): Promise<UnprocessedOutcome[] | null> {
     if (!(await generationOwnsLock(expectedGeneration))) return null;
     const listed = await runOutcomeScript(["unprocessed"]);
@@ -1009,17 +1011,22 @@ export default function (pi: ExtensionAPI) {
     const rows: UnprocessedOutcome[] = [];
     for (const line of listed.stdout.split("\n")) {
       if (!line) continue;
-      let parsed: unknown = null;
-      let row: OutcomeRow | null = null;
+      let row: UnprocessedOutcome | null = null;
       try {
-        parsed = JSON.parse(line);
-        row = parseOutcomeRow(parsed);
+        const parsed = JSON.parse(line);
+        const outcome = parseOutcomeRow(parsed);
+        const recordedAgo = outcome?.verdict === "captain" ? (parsed as { recordedAgo?: unknown }).recordedAgo : undefined;
+        if (outcome && typeof recordedAgo === "string" && /^[0-9]+[mhd]$/.test(recordedAgo)) row = { ...outcome, recordedAgo };
       } catch {
         row = null;
       }
-      if (!row || row.verdict !== "captain") return null;
-      const recordedAgo = (parsed as { recordedAgo?: unknown }).recordedAgo;
-      rows.push({ ...row, recordedAgo: typeof recordedAgo === "string" && /^[0-9]+[mhd]$/.test(recordedAgo) ? recordedAgo : null });
+      if (!row) {
+        deliverBranchHealthNote(
+          `Supervision branch could not present unprocessed captain outcomes: the outcome store listed a row that breaks its contract (${line.slice(0, 200)}). Nothing was marked processed; they are presented again once the store is healthy.`,
+        );
+        return null;
+      }
+      rows.push(row);
     }
     return rows;
   }
@@ -1031,7 +1038,7 @@ export default function (pi: ExtensionAPI) {
   async function processingRequestInput(rows: UnprocessedOutcome[]): Promise<string> {
     const through = rows[rows.length - 1].seq;
     const listed = rows
-      .map((row) => `[seq ${row.seq}${row.recordedAgo ? `, recorded ${row.recordedAgo} ago` : ""}] ${row.task}: ${row.summary}`)
+      .map((row) => `[seq ${row.seq}, recorded ${row.recordedAgo} ago] ${row.task}: ${row.summary}`)
       .join("\n");
     const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
     try {

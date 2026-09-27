@@ -1448,6 +1448,63 @@ EOF
   pass "a captain outcome opens one sequence-keyed processing turn, survives empty and unrelated answers, is re-presented at run end and session start, and closes only on its acknowledgement"
 }
 
+test_undated_unprocessed_outcome_surfaces_and_stays_unprocessed() {
+  local repo home fake_root out status f
+  repo="$TMP_ROOT/undated-outcome-root"
+  home="$TMP_ROOT/undated-outcome-home"
+  fake_root="$TMP_ROOT/undated-outcome-fmroot"
+  mkdir -p "$home/state" "$home/config" "$fake_root/bin"
+  install_pi_branch_extension_fixture "$repo"
+  for f in "$ROOT"/bin/*; do ln -s "$f" "$fake_root/bin/${f##*/}"; done
+  rm "$fake_root/bin/fm-branch-outcome.sh"
+  # A store whose unprocessed listing breaks its contract by dropping the age
+  # while $FM_HOME/strip-age exists.
+  cat > "$fake_root/bin/fm-branch-outcome.sh" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = unprocessed ] && [ -e "\$FM_HOME/strip-age" ]; then
+  set -o pipefail
+  "$ROOT/bin/fm-branch-outcome.sh" "\$@" | jq -c 'del(.recordedAgo)'
+  exit
+fi
+exec "$ROOT/bin/fm-branch-outcome.sh" "\$@"
+SH
+  chmod +x "$fake_root/bin/fm-branch-outcome.sh"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home }; })()`);
+const { fire, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home } = globalThis.__t;
+import { rmSync, writeFileSync } from "node:fs";
+
+const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+const notes = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-merge" && sent.message.display === true);
+const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
+
+const seq = Number(outcomeScript(["append", "--task", "undated", "--verdict", "captain", "--summary", "PR is ready to merge"]));
+outcomeScript(["mark-read", "--through", String(seq)]);
+mainEntries.push({ type: "custom", customType: "fm-branch-visible-outcome", data: { version: 1, seq, task: "undated", verdict: "captain", summary: "PR is ready to merge", silent: false } });
+writeFileSync(`${home}/strip-age`, "");
+await fire("session_start", {}, defaultSessionCtx);
+if (requests().length !== 0) throw new Error(`an undated outcome was formatted into a processing request: ${JSON.stringify(requests())}`);
+if (notes().length !== 1 || !notes()[0].message.content.includes("breaks its contract") || !notes()[0].message.content.includes('"task":"undated"')) {
+  throw new Error(`the store-contract error was not reported visibly to main: ${JSON.stringify(sentToMain)}`);
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("an undated outcome was dropped or treated as processed");
+
+rmSync(`${home}/strip-age`);
+await fire("session_shutdown", {});
+await fire("session_start", {}, defaultSessionCtx);
+if (requests().length !== 1 || !requests()[0].message.content.includes(`[seq ${seq}, recorded 0m ago] undated: PR is ready to merge`)) {
+  throw new Error(`the outcome was not presented, dated, once the store was healthy: ${JSON.stringify(sentToMain)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an unprocessed row without its age must be reported and stay unprocessed: $out"
+  pass "an unprocessed captain row the store lists without its age is reported to main, never formatted undated, and stays unprocessed until the store is healthy"
+}
+
 test_branch_cache_key_is_per_home_stable() {
   local repo home_a home_b key_a1 key_a2 key_b
   repo="$TMP_ROOT/cache-key-root"
@@ -5575,6 +5632,7 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
+test_undated_unprocessed_outcome_surfaces_and_stays_unprocessed
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_dispatch_routes_secondmate_signal_by_new_span
 test_branch_cache_key_is_per_home_stable
