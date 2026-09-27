@@ -82,8 +82,8 @@
 #     A supervision-host drain's presentation off Pi (bin/fm-wake-drain.sh
 #     "BRANCH OUTCOMES", docs/supervision-host.md "Captain outcomes"): under
 #     the lock, print every unread record and every unprocessed captain record
-#     (JSONL, ascending seq, each with an added "unread" boolean and
-#     "recordedAgo"). It moves nothing: off Pi that drain presentation is what
+#     (JSONL, ascending seq, each with an added "unread" boolean, and each
+#     captain record also with "recordedAgo"). It moves nothing: off Pi that drain presentation is what
 #     the visible entry is, so the drain runs mark-read once it has presented
 #     the rows; it is the only reader that advances the cursor there. Prints
 #     nothing when nothing is unread or unprocessed.
@@ -128,7 +128,8 @@ MAX_SAFE_SEQ=9007199254740991
 OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
 OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
-# The "recordedAgo" field present and unprocessed add (see the usage above).
+# The "recordedAgo" field present and unprocessed add to captain rows (see the
+# usage above).
 # Callers pass --argjson now "$(date +%s)".
 # shellcheck disable=SC2016  # jq program text: $now and $s are jq variables.
 RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
@@ -566,7 +567,8 @@ case "$CMD" in
     if [ -s "$STORE" ] && ! jq -c --argjson cursor "$CURSOR_SEQ" --argjson processed "$PROCESSED_SEQ" \
         --argjson now "$(date +%s)" "$RECORDED_AGO_JQ"'
         select(.seq > $cursor or (.verdict == "captain" and .seq > $processed))
-        | . + {unread: (.seq > $cursor), recordedAgo: recorded_ago}' "$STORE"; then
+        | . + {unread: (.seq > $cursor)}
+        | if .verdict == "captain" then . + {recordedAgo: recorded_ago} else . end' "$STORE"; then
       fm_lock_release "$LOCK"
       exit 1
     fi
