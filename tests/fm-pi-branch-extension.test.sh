@@ -924,7 +924,7 @@ EOF
     *) fail "the processing request body lost its self-description or the outcome itself: $body" ;;
   esac
   case "$body" in
-    *"check the task's current state first."*"already settled, such as a decision since answered"*"gets no captain-facing mention at all in your reply or any recap, not even that it is settled"*) ;;
+    *"check the task's current state first."*"sort the outcomes by that current state into still open and already settled"*"Your reply to the captain covers only the still-open outcomes"*"as if the settled outcomes had never been listed"*) ;;
     *) fail "the processing request body lost its check-first instruction for an outcome already settled: $body" ;;
   esac
   # An outcome carried over from before a restart or a switch of primary has

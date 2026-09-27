@@ -209,7 +209,7 @@ A drain that cannot read or project the store (jq missing included), print the s
 The section's budgets count bytes in any locale, so a multibyte summary is cut on a whole UTF-8 character boundary to fit them.
 An unprocessed captain outcome is never adopted as processed, including across an index repair or a switch to Pi; the absent-marker rule is owned by `bin/fm-branch-outcome.sh`.
 A home already switched to the host can re-present its unacknowledged outcomes after an upgrade or interrupted switch, so each captain line shows its recorded age and the section asks main to check current task state before acting.
-Main acknowledges an already-settled outcome with no captain-facing mention at all, not even that it is settled.
+Main's reply to the captain covers only the outcomes still open, as if an already-settled one had never been listed, and main only acknowledges the settled ones.
 Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
 
 One limit: if the captain goes away and returns while an attended engine turn runs, and the host is terminated before that turn's `branch-outcome` wake is delivered, no immediate wake reaches main.

@@ -577,8 +577,9 @@ EOF
 #     main never acknowledged can come back long after its situation settled
 #     (after a harness or posture switch, or an upgrade whose earlier
 #     presenter never advanced the read cursor), and the section asks main to
-#     check the task's current state first and to acknowledge an outcome that
-#     is already settled with no captain-facing mention at all.
+#     check the task's current state first and reply to the captain only
+#     about outcomes still open, acknowledging settled ones as if they had
+#     never been listed.
 #   - Visible routine outcomes are listed once, for awareness, the way the Pi
 #     branch's routine notes reach main's transcript without a turn; silent
 #     routine outcomes never appear. The newest visible rows that fit a byte
@@ -652,7 +653,7 @@ print_branch_outcomes_section() {
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first - process what is still open as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; an outcome the current state shows is already settled, such as a decision since answered, a PR since merged, or a task since finished, needs only the acknowledgement and no captain-facing mention at all in your reply or any recap, not even that it is settled):
+    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
 "
     for line in "${captain_lines[@]}"; do
       text="$text$line

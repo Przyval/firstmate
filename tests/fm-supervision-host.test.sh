@@ -685,8 +685,8 @@ test_branch_outcomes_date_a_legacy_backlog_without_adopting_it() {
     "a days-old captain outcome must say when it was recorded"
   assert_contains "$drained" "[seq 3, recorded 3d ago] beta: beta PR" "every captain outcome must say when it was recorded"
   assert_contains "$drained" "check the task's current state first" "the section must ask main to check the current state before acting"
-  assert_contains "$drained" "needs only the acknowledgement and no captain-facing mention at all in your reply or any recap, not even that it is settled" \
-    "the section must say a settled outcome needs only the acknowledgement and no mention to the captain"
+  assert_contains "$drained" "your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement" \
+    "the section must keep settled outcomes out of the reply to the captain"
   assert_contains "$drained" "mark-processed --through 3;" "the backlog must still carry its acknowledgement"
   [ -n "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
     || fail "the drain adopted a legacy captain outcome as processed"
