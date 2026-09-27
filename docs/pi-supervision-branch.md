@@ -436,7 +436,7 @@ After that, the request rides the captain's next prompt, so an ignored request c
 Changed sequence membership and a session replacement each start that budget over.
 
 Routine outcomes never enter this path and stay turn-free.
-A home with no processed marker, whether upgraded from before the marker existed or switched from the supervision host, presents its delivered captain rows once more, dated and check-first, because nothing sets the marker from the read cursor: the host drain advances that cursor without main acknowledging anything, and no stored state tells which presenter did (`bin/fm-branch-outcome.sh` owns the marker's contract).
+A home with no processed marker, including an upgrade or switch from the supervision host, re-presents delivered captain rows dated and check-first until acknowledged; see the marker contract in `bin/fm-branch-outcome.sh`.
 
 ### Ownership and verdict rules
 
@@ -631,7 +631,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Requested-versus-unsolicited delivery, exact visible entry content, and no unkeyed model turn.
 - The sequence-keyed processing request and its acknowledgement.
 - Re-presentation after an empty reply and after an unrelated prior answer, the triggered-then-next-turn pacing, and session-start re-presentation.
-- Routine outcomes staying turn-free, task-level no-change notes staying hidden, and the processed-marker migration.
+- Routine outcomes staying turn-free, task-level no-change notes staying hidden, absent-marker re-presentation, and malformed-age reporting without acknowledgement.
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
 - Cold-start post-lock recovery, crash-before-cursor reload recovery, and repeated-reload idempotency.
 - Mirroring.
@@ -643,7 +643,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 `tests/fm-branch-supervision.test.sh` covers:
 
 - Prompt stability, including the landed-work cleanup instruction and the second-mate relay, signal-span, and stale-liveness rules.
-- Store append-only behavior, the captain cursor barrier, and the processed marker's sequence bounds.
+- Store append-only behavior, the captain cursor barrier, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
 - Leases, guards, and non-branch-home invariance.
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
 

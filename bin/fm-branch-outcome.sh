@@ -41,7 +41,7 @@
 #     cursor without main acknowledging anything, and no stored state tells
 #     which one did. So a home without a marker, including one upgraded from
 #     before the marker existed or switched between Pi and the host, presents
-#     its delivered captain rows again once, dated and check-first, until main
+#     its delivered captain rows again, dated and check-first, until main
 #     acknowledges them. A marker ahead of the read cursor fails closed.
 #   - Outcome index: $STATE/.<task>.branch-outcome-index stores one bounded
 #     cache of the latest outcome's status provenance. The authoritative copy
@@ -83,9 +83,10 @@
 #     "BRANCH OUTCOMES", docs/supervision-host.md "Captain outcomes"): under
 #     the lock, print every unread record and every unprocessed captain record
 #     (JSONL, ascending seq, each with an added "unread" boolean, and each
-#     captain record also with "recordedAgo"). It moves nothing: off Pi that drain presentation is what
-#     the visible entry is, so the drain runs mark-read once it has presented
-#     the rows; it is the only reader that advances the cursor there. Prints
+#     captain record also with "recordedAgo"). It moves nothing: off Pi that
+#     drain presentation is what the visible entry is, so the drain runs
+#     mark-read once it has presented the rows; it is the only reader that
+#     advances the cursor there. Prints
 #     nothing when nothing is unread or unprocessed.
 #     "recordedAgo" is how long before this read the row was appended, as
 #     whole minutes under an hour, whole hours under two days, else whole days
@@ -95,9 +96,10 @@
 #     acknowledged can be presented again long after its situation settled.
 #   fm-branch-outcome.sh processed-init [--held-lock]
 #     Validate the read cursor and the processed marker without changing them,
-#     then rebuild the bounded per-task outcome indexes. --held-lock is only for a descendant
-#     of the process holding $STATE/.branch-outcomes.lock (fm-wake-drain.sh may
-#     run its redirected presentation body in a subshell on Bash 3.2); it skips
+#     then rebuild the bounded per-task outcome indexes. --held-lock is only
+#     for a descendant of the process holding $STATE/.branch-outcomes.lock
+#     (fm-wake-drain.sh may run its redirected presentation body in a subshell
+#     on Bash 3.2); it skips
 #     the nested acquire so drain's bounded lock wait remains the deadline.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
