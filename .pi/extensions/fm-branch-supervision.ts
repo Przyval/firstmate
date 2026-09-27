@@ -188,10 +188,10 @@ const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
-  "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
-  "Each outcome says what was true when it was recorded, so check the task's current state first. " +
+  "The outcomes below are stored durably, and each was recorded earlier, possibly before a restart or a switch of primary, so the captain may already have seen it and it may already have been handled; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
+  "Each outcome says what was true when it was recorded and how long ago, so check the task's current state first. " +
   "Process what is still open now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, or act on a blocker or failure. " +
-  "An outcome the current state shows is already settled, such as a PR since merged or a decision since answered, needs no response to the captain; it is processed once you have checked it. " +
+  "An outcome the current state shows is already settled, such as a decision since answered, a PR since merged, or a task since finished, gets no captain-facing mention at all in your reply or any recap, not even that it is settled; checking it is all the processing it needs. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };

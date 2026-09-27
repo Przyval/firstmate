@@ -924,8 +924,17 @@ EOF
     *) fail "the processing request body lost its self-description or the outcome itself: $body" ;;
   esac
   case "$body" in
-    *"check the task's current state first."*"already settled, such as a PR since merged"*"needs no response to the captain"*) ;;
+    *"check the task's current state first."*"already settled, such as a decision since answered"*"gets no captain-facing mention at all in your reply or any recap, not even that it is settled"*) ;;
     *) fail "the processing request body lost its check-first instruction for an outcome already settled: $body" ;;
+  esac
+  # An outcome carried over from before a restart or a switch of primary has
+  # no visible entry in this transcript, so the request must not claim one.
+  case "$body" in
+    *"was recorded earlier, possibly before a restart or a switch of primary"*"may already have been handled"*) ;;
+    *) fail "the processing request body does not say its outcomes were recorded earlier and may already be handled: $body" ;;
+  esac
+  case "$body" in
+    *"anchor entries in this transcript"*) fail "the processing request claims transcript entries a carried-over outcome does not have: $body" ;;
   esac
   case "$body" in
     *"do not re-drain, re-run, or acknowledge the wake."*"call fm_branch_processed with through=3 exactly once."*"never counts as processing."*) ;;
