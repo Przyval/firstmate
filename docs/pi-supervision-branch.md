@@ -413,7 +413,8 @@ Display is only half of a captain outcome.
 The other half is processing, because a blocker, a decision, or a ready PR needs main to act, not only the captain to see it.
 
 1. After the visible entry exists and the read cursor has passed it, the extension hands every still-unprocessed captain row to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`).
-   The request lists each `[seq N] task: summary`.
+   The request lists each `[seq N, recorded <age> ago] task: summary`, with the age from the store's `recordedAgo` (`bin/fm-branch-outcome.sh` owns its wording), and asks main to check the task's current state first.
+   An outcome the current state shows is already settled needs no response to the captain, only the acknowledgement below.
 2. That request opens exactly one main turn.
 3. Main closes it only by calling `fm_branch_processed` with the highest sequence the request listed.
    That call advances a processed marker, which `bin/fm-branch-outcome.sh` keeps separately from the read cursor and never moves past it or backwards.

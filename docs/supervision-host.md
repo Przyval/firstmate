@@ -208,6 +208,8 @@ A long away window no longer requires a drain per outcome: each task's captain o
 A drain that cannot read or project the store (jq missing included), print the section, or advance its read cursor says so and marks nothing it has not shown as read, and it exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
 The section's budgets count bytes in any locale, so a multibyte summary is cut on a whole UTF-8 character boundary to fit them.
 An unprocessed captain outcome is never adopted as processed, so a home that opts in mid-session cannot lose its first one.
+Because of that, an outcome can come back long after its situation settled, such as after a switch of primary harness or posture, or at the first drain after an upgrade whose earlier presenter never advanced the read cursor.
+So each captain line says how long ago it was recorded, and the section asks main to check the task's current state first and to acknowledge an outcome that is already settled without relaying it to the captain.
 Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
 
 One limit: if the captain goes away and returns while an attended engine turn runs, and the host is terminated before that turn's `branch-outcome` wake is delivered, no immediate wake reaches main.

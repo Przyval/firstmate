@@ -189,7 +189,9 @@ const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
   "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
-  "Process each outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
+  "Each outcome says what was true when it was recorded, so check the task's current state first. " +
+  "Process what is still open now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, or act on a blocker or failure. " +
+  "An outcome the current state shows is already settled, such as a PR since merged or a decision since answered, needs no response to the captain; it is processed once you have checked it. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
@@ -204,6 +206,9 @@ type OutcomeRow = {
   silent: boolean;
 };
 type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
+// An unprocessed captain row with the store's "recordedAgo" (bin/fm-branch-outcome.sh
+// owns its wording), or null when the store line carries none.
+type UnprocessedOutcome = OutcomeRow & { recordedAgo: string | null };
 type ProviderRecovery = {
   cooldownMs: number;
   retryNotBefore: number;
@@ -997,21 +1002,24 @@ export default function (pi: ExtensionAPI) {
   // Captain rows that are read (their visible entry exists) but not yet
   // acknowledged as processed by main, in sequence order. null means the store
   // could not be read safely, never "nothing".
-  async function readUnprocessedOutcomes(expectedGeneration: number): Promise<OutcomeRow[] | null> {
+  async function readUnprocessedOutcomes(expectedGeneration: number): Promise<UnprocessedOutcome[] | null> {
     if (!(await generationOwnsLock(expectedGeneration))) return null;
     const listed = await runOutcomeScript(["unprocessed"]);
     if (!listed.ok) return null;
-    const rows: OutcomeRow[] = [];
+    const rows: UnprocessedOutcome[] = [];
     for (const line of listed.stdout.split("\n")) {
       if (!line) continue;
+      let parsed: unknown = null;
       let row: OutcomeRow | null = null;
       try {
-        row = parseOutcomeRow(JSON.parse(line));
+        parsed = JSON.parse(line);
+        row = parseOutcomeRow(parsed);
       } catch {
         row = null;
       }
       if (!row || row.verdict !== "captain") return null;
-      rows.push(row);
+      const recordedAgo = (parsed as { recordedAgo?: unknown }).recordedAgo;
+      rows.push({ ...row, recordedAgo: typeof recordedAgo === "string" && /^[0-9]+[mhd]$/.test(recordedAgo) ? recordedAgo : null });
     }
     return rows;
   }
@@ -1020,9 +1028,11 @@ export default function (pi: ExtensionAPI) {
   // failure direction applies: a request that cannot be typed is still
   // delivered as plain text, because an untyped request main can still act on
   // beats an outcome that is never processed.
-  async function processingRequestInput(rows: OutcomeRow[]): Promise<string> {
+  async function processingRequestInput(rows: UnprocessedOutcome[]): Promise<string> {
     const through = rows[rows.length - 1].seq;
-    const listed = rows.map((row) => `[seq ${row.seq}] ${row.task}: ${row.summary}`).join("\n");
+    const listed = rows
+      .map((row) => `[seq ${row.seq}${row.recordedAgo ? `, recorded ${row.recordedAgo} ago` : ""}] ${row.task}: ${row.summary}`)
+      .join("\n");
     const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
     try {
       return await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", body);

@@ -68,8 +68,9 @@
 #   fm-branch-outcome.sh mark-read --through <seq>
 #     Advance the cursor (never backwards) after handing the records to Pi.
 #   fm-branch-outcome.sh unprocessed
-#     Print every captain record that is read but not yet processed (raw
-#     JSONL, ascending seq). Exit 0 with no output when none.
+#     Print every captain record that is read but not yet processed (JSONL,
+#     ascending seq, each with an added "recordedAgo"). Exit 0 with no output
+#     when none.
 #   fm-branch-outcome.sh mark-processed --through <seq>
 #     Advance the processed marker after main acknowledged the captain rows
 #     through <seq>; the target itself must be a currently unprocessed captain
@@ -78,11 +79,17 @@
 #     A supervision-host drain's presentation off Pi (bin/fm-wake-drain.sh
 #     "BRANCH OUTCOMES", docs/supervision-host.md "Captain outcomes"): under
 #     the lock, print every unread record and every unprocessed captain record
-#     (raw JSONL, ascending seq, each with an added "unread" boolean). It
-#     moves nothing: off Pi that drain presentation is what the visible entry
-#     is, so the drain runs mark-read once it has presented the rows; it is
-#     the only reader that advances the cursor there. Prints nothing when
-#     nothing is unread or unprocessed.
+#     (JSONL, ascending seq, each with an added "unread" boolean and
+#     "recordedAgo"). It moves nothing: off Pi that drain presentation is what
+#     the visible entry is, so the drain runs mark-read once it has presented
+#     the rows; it is the only reader that advances the cursor there. Prints
+#     nothing when nothing is unread or unprocessed.
+#     "recordedAgo" is how long before this read the row was appended, as
+#     whole minutes under an hour, whole hours under two days, else whole days
+#     (for example "0m", "5h", "6d"; a future epoch reads "0m"). It is the one
+#     owner of that wording for both presenters, the drain's BRANCH OUTCOMES
+#     section and the Pi branch's processing request, because a row main never
+#     acknowledged can be presented again long after its situation settled.
 #   fm-branch-outcome.sh processed-init [--held-lock]
 #     Rebuild the bounded per-task outcome indexes, then create the processed
 #     marker at the current read cursor when it does not exist yet; validate a
@@ -119,6 +126,13 @@ MAX_SAFE_SEQ=9007199254740991
 OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
 OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
+# The "recordedAgo" field present and unprocessed add (see the usage above).
+# Callers pass --argjson now "$(date +%s)".
+# shellcheck disable=SC2016  # jq program text: $now and $s are jq variables.
+RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
+  | if $s < 3600 then "\($s / 60 | floor)m"
+    elif $s < 172800 then "\($s / 3600 | floor)h"
+    else "\($s / 86400 | floor)d" end;'
 
 usage() {
   echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay" >&2
@@ -364,8 +378,9 @@ print_unprocessed() {
     return 1
   fi
   [ -s "$STORE" ] || return 0
-  jq -c --argjson processed "$processed" --argjson cursor "$cursor" \
-    'select(.verdict == "captain" and .seq > $processed and .seq <= $cursor)' "$STORE"
+  jq -c --argjson processed "$processed" --argjson cursor "$cursor" --argjson now "$(date +%s)" \
+    "$RECORDED_AGO_JQ"'select(.verdict == "captain" and .seq > $processed and .seq <= $cursor)
+      | . + {recordedAgo: recorded_ago}' "$STORE"
 }
 
 # Assumes $LOCK is already held. Callers that do not already hold it use the
@@ -550,9 +565,10 @@ case "$CMD" in
       echo "error: refusing presentation because the outcome cursor or processed marker is out of order" >&2
       exit 1
     fi
-    if [ -s "$STORE" ] && ! jq -c --argjson cursor "$CURSOR_SEQ" --argjson processed "$PROCESSED_SEQ" '
+    if [ -s "$STORE" ] && ! jq -c --argjson cursor "$CURSOR_SEQ" --argjson processed "$PROCESSED_SEQ" \
+        --argjson now "$(date +%s)" "$RECORDED_AGO_JQ"'
         select(.seq > $cursor or (.verdict == "captain" and .seq > $processed))
-        | . + {unread: (.seq > $cursor)}' "$STORE"; then
+        | . + {unread: (.seq > $cursor), recordedAgo: recorded_ago}' "$STORE"; then
       fm_lock_release "$LOCK"
       exit 1
     fi

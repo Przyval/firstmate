@@ -414,6 +414,34 @@ test_outcome_present_reads_without_advancing() {
   pass "outcome store: present shows each routine row once and each captain row until it is acknowledged"
 }
 
+# Both presenters name how long ago each row was recorded, in the one wording
+# the store owns: minutes under an hour, hours under two days, then days, with
+# a clock that moved backwards reading as just recorded. It is computed at
+# read time and never written into the store.
+test_outcome_rows_carry_their_recorded_age() {
+  local home store now snapshot out
+  home="$TMP_ROOT/store-age-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  now=$(date +%s)
+  local epoch seq=0
+  for epoch in $((now + 600)) $((now - 125)) $((now - 90 * 60)) $((now - 47 * 3600)) $((now - 49 * 3600)) $((now - 6 * 86400 - 60)); do
+    seq=$((seq + 1))
+    printf '{"seq":%s,"epoch":%s,"task":"task-%s","wake":"","verdict":"captain","summary":"row %s","silent":false}\n' \
+      "$seq" "$epoch" "$seq" "$seq" >> "$store"
+  done
+  snapshot=$(cat "$store")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present) || fail "present failed"
+  [ "$(printf '%s\n' "$out" | jq -r '.recordedAgo' | tr '\n' ' ')" = "0m 2m 1h 47h 2d 6d " ] \
+    || fail "present did not name each row's recorded age: $out"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 6 || fail "mark-read failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) || fail "unprocessed failed"
+  [ "$(printf '%s\n' "$out" | jq -r '"\(.seq):\(.recordedAgo)"' | tr '\n' ' ')" = "1:0m 2:2m 3:1h 4:47h 5:2d 6:6d " ] \
+    || fail "unprocessed did not name each row's recorded age: $out"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "reading the age changed the store"
+  pass "outcome store: present and unprocessed name each row's recorded age without writing it"
+}
+
 test_outcome_processed_marker_is_sequence_bound() {
   local home marker out status
   home="$TMP_ROOT/store-processed-home"
@@ -1352,6 +1380,7 @@ test_outcome_lookup_returns_exact_sequences_and_refuses_missing_rows
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
 test_outcome_present_reads_without_advancing
+test_outcome_rows_carry_their_recorded_age
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
