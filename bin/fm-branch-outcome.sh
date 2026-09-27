@@ -17,12 +17,13 @@
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
 #     and truncation, if ever needed, is a captain-approved manual act.
-#   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
-#     Pi as a routine merge note, persisted as a sequence-keyed visible captain
-#     entry, emitted by the locked session-start replay, or silently consumed
-#     there because `silent` is true. Records above the cursor are unread.
-#     A captain row advances only after its matching visible entry exists in
-#     Pi's session, so reload recovery is idempotent across that crash window.
+#   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq presented
+#     by Pi as a routine merge note or sequence-keyed visible captain entry,
+#     emitted by Pi's locked session-start replay, silently consumed there
+#     because `silent` is true, or presented by the supervision-host drain.
+#     Records above the cursor are unread. A captain row advances only after
+#     Pi persists its matching visible entry or the host prints its drain
+#     section, so interrupted presentation can be retried.
 #     A cursor beyond the validated store tail fails closed.
 #   - Processed marker: $STATE/.branch-outcomes-processed holds the highest
 #     seq whose captain rows main has ACKNOWLEDGED as processed, separately
@@ -69,7 +70,8 @@
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
-#     Advance the cursor (never backwards) after handing the records to Pi.
+#     Advance the cursor (never backwards) after Pi delivers the records or
+#     the host presents them in its drain.
 #   fm-branch-outcome.sh unprocessed
 #     Print every captain record that is read but not yet processed (JSONL,
 #     ascending seq, each with an added "recordedAgo"). Exit 0 with no output
@@ -86,8 +88,8 @@
 #     captain record also with "recordedAgo"). It moves nothing: off Pi that
 #     drain presentation is what the visible entry is, so the drain runs
 #     mark-read once it has presented the rows; it is the only reader that
-#     advances the cursor there. Prints
-#     nothing when nothing is unread or unprocessed.
+#     advances the cursor there. Prints nothing when nothing is unread or
+#     unprocessed.
 #     "recordedAgo" is how long before this read the row was appended, as
 #     whole minutes under an hour, whole hours under two days, else whole days
 #     (for example "0m", "5h", "6d"; a future epoch reads "0m"). It is the one
@@ -99,8 +101,8 @@
 #     then rebuild the bounded per-task outcome indexes. --held-lock is only
 #     for a descendant of the process holding $STATE/.branch-outcomes.lock
 #     (fm-wake-drain.sh may run its redirected presentation body in a subshell
-#     on Bash 3.2); it skips
-#     the nested acquire so drain's bounded lock wait remains the deadline.
+#     on Bash 3.2); it skips the nested acquire so drain's bounded lock wait
+#     remains the deadline.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh lookup --seqs <n,...>
