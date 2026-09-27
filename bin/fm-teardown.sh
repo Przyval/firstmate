@@ -86,7 +86,16 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# collision itself. The pane-driven `treehouse get` holds only a process lease,
+# so a finished task whose worker exited while its record was kept (a paused or
+# held scout) leaves a slot the pool hands to the next spawn. Two crewmate
+# records on one slot are therefore resolved by handout order rather than
+# refused forever: the slot's claim naming this task, or, with no claim, a later
+# spawn_gen stamp than the other record's, makes the other record the stale one
+# and this cleanup proceeds; an earlier stamp makes THIS record the stale one and
+# it is treated exactly like a claim naming another task (below). Tearing down
+# each stale record then clears the pair. A home= collision, or records whose
+# order cannot be proved, still refuse even with --force.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2340,10 +2349,33 @@ collect_local_firstmate_states() {
   done
 }
 
+# Spawn epoch of a task record, from spawn_gen=s<epoch>.<pid>.<nonce>; fails
+# when the record has no single well-formed stamp.
+record_spawn_epoch() {  # <meta>
+  local gen epoch
+  gen=$(fm_meta_get "$1" spawn_gen)
+  epoch=${gen#s}
+  epoch=${epoch%%.*}
+  case "$gen:$epoch" in
+    s*:*[!0-9]*|s*:) return 1 ;;
+    s*) printf '%s\n' "$epoch" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Returns TEARDOWN_SLOT_REASSIGNED_RC (with FM_TREEHOUSE_SLOT_OWNER_ID naming
+# the newer task) when another record proves this one is the stale holder.
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
+  local claim own_epoch other_epoch other_kind
   slot=$(canonical_existing_dir "$worktree") || return 0
+  # The slot's own claim, when present, names the task that took it last, which
+  # settles which of two records sharing the slot is stale (see the header).
+  fm_treehouse_slot_owner_state "$worktree" "$record_id"
+  claim=$FM_TREEHOUSE_SLOT_OWNER
+  [ "$claim" != other ] || return 0
+  own_epoch=$(record_spawn_epoch "$record_meta") || own_epoch=
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
@@ -2359,6 +2391,26 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        other_kind=$(fm_meta_get "$other" kind)
+        if [ "$field" = worktree ] && [ "$other_kind" != secondmate ]; then
+          # The pool hands a slot on only once no process runs under it, so of
+          # two task records on one slot the later spawn is the holder and the
+          # earlier one is stale. Evidence: this task's own claim, else both
+          # records' spawn stamps.
+          other_epoch=$(record_spawn_epoch "$other") || other_epoch=
+          if [ "$claim" = mine ] || { [ "$claim" = absent ] && [ -n "$own_epoch" ] &&
+               [ -n "$other_epoch" ] && [ "$other_epoch" -lt "$own_epoch" ]; }; then
+            echo "warning: task $other_id's record also names $slot, but that slot was handed to $record_id after $other_id was spawned; $other_id's record is stale there and does not block this cleanup (tear $other_id down to clear it)." >&2
+            continue 2
+          fi
+          if [ "$claim" = absent ] && [ -n "$own_epoch" ] && [ -n "$other_epoch" ] &&
+             [ "$other_epoch" -gt "$own_epoch" ]; then
+            FM_TREEHOUSE_SLOT_OWNER_ID=$other_id
+            FM_TREEHOUSE_SLOT_OWNER_HOME=${state_dir%/state}
+            echo "warning: task $record_id's recorded worktree $slot was handed to task $other_id, spawned after $record_id; that slot is no longer $record_id's, so its processes, copy, and claim are left untouched and only $record_id's own cleanup runs." >&2
+            return "$TEARDOWN_SLOT_REASSIGNED_RC"
+          fi
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
@@ -2369,9 +2421,19 @@ require_exclusive_worktree_slot_record() {
 }
 
 require_exclusive_task_worktree_slot() {
-  local slot
+  local slot rc=0
   slot=$(teardown_live_slot_path) || return 0
-  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
+  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    "$TEARDOWN_SLOT_REASSIGNED_RC")
+      TEARDOWN_SLOT_REASSIGNED=1
+      TEARDOWN_SLOT_REASSIGNED_TO=$FM_TREEHOUSE_SLOT_OWNER_ID
+      TEARDOWN_SLOT_REASSIGNED_HOME=$FM_TREEHOUSE_SLOT_OWNER_HOME
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 # Positive slot ownership, read from the claim the task that took the slot wrote
@@ -2960,9 +3022,9 @@ preflight_descendant_treehouse_slots() {
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
     owner_rc=0
-    require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
+    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || owner_rc=$?
+    [ "$owner_rc" != 0 ] || require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
       0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
       *) return 1 ;;

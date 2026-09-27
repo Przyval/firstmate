@@ -983,6 +983,71 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+# The recurring deadlock: a finished scout's worker exited while its record was
+# kept, so the pool handed its slot to a later spawn, and each record's teardown
+# refused on the other's. Handout order - the slot claim, or with no claim the
+# records' spawn stamps - names the stale record, so both clean up.
+test_shared_slot_records_resolve_by_handout_order() {
+  local dir old=old-scout new=new-scout
+
+  dir=$(make_case slot-shared-unclaimed)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  run_case "$dir" "$new" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the later spawn on a shared slot refused: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$new.meta" "the slot holder's record was not removed"
+  assert_present "$dir/home/state/$old.meta" "the holder's teardown removed the stale record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the slot holder's teardown did not return its slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$old" "the warning should name the stale record"
+
+  run_case "$dir" "$old" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the stale record on a shared slot refused: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$old.meta" "the stale record was not removed"
+
+  # Stale record torn down first: it leaves the slot alone for the holder.
+  dir=$(make_case slot-shared-stale-first)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  run_case "$dir" "$old" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the stale record refused: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$old.meta" "the stale record was not removed"
+  assert_present "$dir/home/state/$new.meta" "the stale teardown removed the holder's record"
+  assert_present "$dir/worktree/sentinel" "the stale teardown reset the holder's slot"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the stale record's teardown returned the holder's slot"
+  assert_contains "$(cat "$dir/stderr")" "$new" "the warning should name the holder"
+
+  # The holder's claim settles it even when the stale record has no stamp.
+  dir=$(make_case slot-shared-claimed)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$new"
+  run_case "$dir" "$new" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the claimed holder refused: $(cat "$dir/stderr")"
+  assert_present "$dir/home/state/$old.meta" "the holder's teardown removed the stale record"
+  run_case "$dir" "$old" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the unstamped stale record refused after the holder left: $(cat "$dir/stderr")"
+
+  pass "fm-teardown: two task records on one pool slot resolve by handout order instead of refusing each other"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1403,6 +1468,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_shared_slot_records_resolve_by_handout_order
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
