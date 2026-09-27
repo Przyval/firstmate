@@ -435,7 +435,7 @@ After that, the request rides the captain's next prompt, so an ignored request c
 Changed sequence membership and a session replacement each start that budget over.
 
 Routine outcomes never enter this path and stay turn-free.
-A home upgraded with outcomes already delivered treats those rows as processed once, at the first reconciliation that finds no processed marker, so its history is not re-presented.
+A home with no processed marker, whether upgraded from before the marker existed or switched from the supervision host, presents its delivered captain rows once more, dated and check-first, because nothing sets the marker from the read cursor: the host drain advances that cursor without main acknowledging anything, and no stored state tells which presenter did (`bin/fm-branch-outcome.sh` owns the marker's contract).
 
 ### Ownership and verdict rules
 

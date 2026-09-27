@@ -522,9 +522,9 @@ test_outcome_processed_marker_is_sequence_bound() {
   [ "$(cat "$marker")" = 999999999999999999999999999999999 ] \
     || fail "out-of-range marker refusal changed the marker"
 
-  # Migration: a home with delivered history and no marker starts processed
-  # at its read cursor, so that history is not re-presented; an absent marker
-  # otherwise reads as zero, the safe direction.
+  # A home with delivered history and no marker cannot tell a read row from
+  # an acknowledged one, so processed-init never adopts the read cursor: the
+  # absent marker keeps reading as zero, the safe direction.
   home="$TMP_ROOT/store-processed-migration-home"
   mkdir -p "$home/state"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
@@ -533,10 +533,10 @@ test_outcome_processed_marker_is_sequence_bound() {
   assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" '"seq":1' \
     "an absent marker hid a delivered captain row instead of reading as zero"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init || fail "migration processed-init failed"
-  [ "$(cat "$home/state/.branch-outcomes-processed")" = 1 ] || fail "processed-init did not start at the read cursor"
-  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
-    || fail "migrated history was re-presented for processing"
-  pass "the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and migrates delivered history once"
+  [ ! -e "$home/state/.branch-outcomes-processed" ] || fail "processed-init created the marker from the read cursor"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" '"seq":1' \
+    "processed-init adopted a delivered but unacknowledged captain row as processed"
+  pass "the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and never adopts delivered history"
 }
 
 # --- lease contract -----------------------------------------------------------

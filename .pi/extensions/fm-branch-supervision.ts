@@ -1112,10 +1112,11 @@ export default function (pi: ExtensionAPI) {
   // multi-tool run never receives duplicate requests.
   async function reconcileUnreadOutcomes(expectedGeneration: number, present = true): Promise<boolean> {
     if (!(await generationOwnsLock(expectedGeneration))) return false;
-    // One-time migration per generation: a home whose outcomes were all
-    // delivered before the processed marker existed treats them as processed
-    // rather than re-presenting its whole history. Runs before any new row
-    // can be read below, so nothing delivered from here on is ever skipped.
+    // Once per generation: validate the store's markers and rebuild its
+    // bounded indexes before any row is read below. It never adopts delivered
+    // rows as processed, so an outcome main never acknowledged, including one
+    // a supervision-host drain presented before a switch to Pi, is presented
+    // again dated and check-first.
     if (processedInitializedGeneration !== expectedGeneration) {
       if (!(await runOutcomeScript(["processed-init"])).ok) return false;
       processedInitializedGeneration = expectedGeneration;

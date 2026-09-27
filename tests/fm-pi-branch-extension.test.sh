@@ -1254,23 +1254,28 @@ test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus }; })()`);
 const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus } = globalThis.__t;
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 
-const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+let requestsFloor = 0;
+const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process").slice(requestsFloor);
 const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
 const runOf = async (fn) => { await fire("agent_start", {}); await fn?.(); await fire("agent_end", {}); await fire("agent_settled", {}); };
 
-// A home upgraded with outcomes that were delivered before the processed
-// marker existed treats them as processed once, at the first reconciliation:
-// its history is not re-presented to the captain.
+// A home with a delivered captain row and no processed marker (upgraded from
+// before the marker existed, or switched from the supervision host, whose
+// drain advances the same read cursor) cannot tell a read row from an
+// acknowledged one, so the first reconciliation presents it again for
+// processing instead of adopting it as processed.
 const legacy = Number(outcomeScript(["append", "--task", "legacy", "--verdict", "captain", "--summary", "delivered before processing existed"]));
 outcomeScript(["mark-read", "--through", String(legacy)]);
 mainEntries.push({ type: "custom", customType: "fm-branch-visible-outcome", data: { version: 1, seq: legacy, task: "legacy", verdict: "captain", summary: "delivered before processing existed", silent: false } });
 await fire("session_start", {}, defaultSessionCtx);
-if (requests().length !== 0) throw new Error(`the upgrade migration re-presented already-delivered history: ${JSON.stringify(sentToMain)}`);
-if (readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() !== String(legacy)) {
-  throw new Error("the processed marker was not initialized at the read cursor on first reconciliation");
+if (requests().length !== 1 || !requests()[0].message.content.includes(`[seq ${legacy}, recorded 0m ago] legacy: delivered before processing existed`)) {
+  throw new Error(`a delivered but unacknowledged row was not presented again for processing: ${JSON.stringify(sentToMain)}`);
 }
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([legacy])) throw new Error("the first reconciliation adopted a delivered row as processed");
+outcomeScript(["mark-processed", "--through", String(legacy)]);
+requestsFloor = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process").length;
 
 // A routine outcome never opens a processing turn. Keep the scripted prompt
 // open through its report, as the real AgentSession does for tool execution.

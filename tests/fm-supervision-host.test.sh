@@ -745,6 +745,53 @@ test_branch_outcomes_keep_an_unshown_outcome_until_acknowledged() {
   pass "drain: an outcome nothing has shown is presented until acknowledged, and a repeated acknowledgement changes nothing"
 }
 
+# A host home whose drain has presented a captain outcome twice without an
+# acknowledgement: the read cursor is past it and the processed marker is
+# still absent. Sets PRESENTED_HOME.
+present_unacknowledged_outcome_twice() {  # <name>
+  local drained
+  PRESENTED_HOME="$TMP_ROOT/$1"
+  mkdir -p "$PRESENTED_HOME/state" "$PRESENTED_HOME/config"
+  : > "$PRESENTED_HOME/config/supervision-host"
+  FM_HOME="$PRESENTED_HOME" "$ROOT/bin/fm-branch-outcome.sh" append --task epsilon --verdict captain \
+    --summary 'epsilon PR is ready to merge' >/dev/null || fail "fixture: could not record the captain outcome"
+  for _ in 1 2; do
+    drained=$(FM_HOME="$PRESENTED_HOME" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+    assert_contains "$drained" "epsilon: epsilon PR is ready to merge" "fixture: the drain must present the captain outcome"
+  done
+  [ "$(cat "$PRESENTED_HOME/state/.branch-outcomes-cursor")" = 1 ] || fail "fixture: the drain did not advance the read cursor"
+  assert_absent "$PRESENTED_HOME/state/.branch-outcomes-processed" "fixture: nothing acknowledged the outcome"
+}
+
+# A switch to Pi runs processed-init before reading unprocessed rows. The row
+# the host drain presented but main never acknowledged must stay unprocessed
+# rather than being adopted from the read cursor.
+test_branch_outcomes_keep_a_drain_presented_outcome_across_a_switch_to_pi() {
+  present_unacknowledged_outcome_twice drain-switch-to-pi
+  FM_HOME="$PRESENTED_HOME" "$ROOT/bin/fm-branch-outcome.sh" processed-init \
+    || fail "processed-init failed as the Pi reconciliation runs it"
+  assert_contains "$(FM_HOME="$PRESENTED_HOME" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" '"seq":1' \
+    "a switch to Pi adopted a drain-presented, unacknowledged outcome as processed"
+  pass "drain: an outcome the host drain presented but main never acknowledged stays unprocessed across a switch to Pi"
+}
+
+# A lost index-ready marker makes the next drain's status backstop run
+# processed-init under the outcome lock before BRANCH OUTCOMES. That repair
+# must not adopt the presented but unacknowledged row either.
+test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair() {
+  local drained
+  present_unacknowledged_outcome_twice drain-index-repair
+  rm -f "$PRESENTED_HOME/state/.branch-outcome-index-ready"
+  printf 'working: rebasing onto main\n' > "$PRESENTED_HOME/state/epsilon.status"
+  drained=$(FM_HOME="$PRESENTED_HOME" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  [ -f "$PRESENTED_HOME/state/.branch-outcome-index-ready" ] || fail "the drain's status backstop did not repair the outcome index"
+  assert_contains "$drained" "epsilon: epsilon PR is ready to merge" \
+    "an index repair adopted a drain-presented, unacknowledged outcome as processed"
+  assert_contains "$(FM_HOME="$PRESENTED_HOME" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" '"seq":1' \
+    "an index repair left the unacknowledged outcome processed"
+  pass "drain: an outcome the host drain presented but main never acknowledged survives an outcome index repair"
+}
+
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main() {
   local home first drained
   home=$(make_home attended-routine attended)
@@ -2143,6 +2190,8 @@ test_branch_outcomes_stay_unread_when_the_drain_cannot_print
 test_branch_outcomes_date_a_legacy_backlog_without_adopting_it
 test_branch_outcomes_date_an_outcome_carried_across_a_switch_off_pi
 test_branch_outcomes_keep_an_unshown_outcome_until_acknowledged
+test_branch_outcomes_keep_a_drain_presented_outcome_across_a_switch_to_pi
+test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
 test_attended_captain_outcome_reaches_main_through_branch_outcomes
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return

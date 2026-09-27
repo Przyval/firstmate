@@ -35,11 +35,14 @@
 #     the read cursor; a routine, unread, or already-processed target is
 #     refused. It never moves past the read cursor or backwards, so an
 #     unrelated or empty model answer cannot move it. An absent marker reads as
-#     0 (every delivered captain row is unprocessed, the safe direction);
-#     processed-init is the one-time migration that sets an absent marker to
-#     the read cursor so rows delivered before the marker existed are not
-#     re-presented. A present marker is validated before the migration returns,
-#     and a marker ahead of the read cursor fails closed.
+#     0 (every delivered captain row is unprocessed, the safe direction), and
+#     nothing ever creates it from the read cursor: the Pi branch's visible
+#     entries and a supervision-host drain's presentation both advance that
+#     cursor without main acknowledging anything, and no stored state tells
+#     which one did. So a home without a marker, including one upgraded from
+#     before the marker existed or switched between Pi and the host, presents
+#     its delivered captain rows again once, dated and check-first, until main
+#     acknowledges them. A marker ahead of the read cursor fails closed.
 #   - Outcome index: $STATE/.<task>.branch-outcome-index stores one bounded
 #     cache of the latest outcome's status provenance. The authoritative copy
 #     is in the append-only row. $STATE/.branch-outcome-index-ready is removed
@@ -91,9 +94,8 @@
 #     section and the Pi branch's processing request, because a row main never
 #     acknowledged can be presented again long after its situation settled.
 #   fm-branch-outcome.sh processed-init [--held-lock]
-#     Rebuild the bounded per-task outcome indexes, then create the processed
-#     marker at the current read cursor when it does not exist yet; validate a
-#     present marker without changing it. --held-lock is only for a descendant
+#     Validate the read cursor and the processed marker without changing them,
+#     then rebuild the bounded per-task outcome indexes. --held-lock is only for a descendant
 #     of the process holding $STATE/.branch-outcomes.lock (fm-wake-drain.sh may
 #     run its redirected presentation body in a subshell on Bash 3.2); it skips
 #     the nested acquire so drain's bounded lock wait remains the deadline.
@@ -398,16 +400,12 @@ processed_init_locked() {
     echo "error: refusing processed initialization because the outcome cursor is ahead of the store" >&2
     return 1
   fi
-  if [ -e "$PROCESSED" ]; then
-    if ! processed_seq=$(read_processed); then
-      return 1
-    fi
-    if [ "$processed_seq" -gt "$cursor_seq" ]; then
-      echo "error: refusing processed initialization because the processed marker is ahead of the read cursor" >&2
-      return 1
-    fi
-  else
-    write_processed "$cursor_seq" || return 1
+  if ! processed_seq=$(read_processed); then
+    return 1
+  fi
+  if [ "$processed_seq" -gt "$cursor_seq" ]; then
+    echo "error: refusing processed initialization because the processed marker is ahead of the read cursor" >&2
+    return 1
   fi
   if ! rebuild_outcome_indexes; then
     echo "error: outcome index migration could not be completed safely" >&2
