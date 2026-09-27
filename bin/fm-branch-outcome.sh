@@ -73,10 +73,9 @@
 #     Advance the cursor (never backwards) after Pi delivers the records or
 #     the host presents them in its drain.
 #   fm-branch-outcome.sh unprocessed
-#     Print every captain record that is read but not yet processed (JSONL,
-#     ascending seq, up to 32 per call, each with "recordedAgo"; long summaries
-#     are abbreviated for this processing view). Exit 0 with no output
-#     when none.
+#     Print read but unprocessed captain records as JSONL in ascending seq, up to 32 per call, each with "recordedAgo".
+#     Summaries over 1024 characters are abbreviated within that bound and point to lookup --seqs <n> for the full outcome.
+#     Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-processed --through <seq>
 #     Advance the processed marker after main acknowledged the captain rows
 #     through <seq>; the target itself must be a currently unprocessed captain
@@ -390,7 +389,8 @@ print_unprocessed() {
     "$RECORDED_AGO_JQ"'(reduce inputs as $row ([];
         if length < 32 and $row.verdict == "captain" and $row.seq > $processed and $row.seq <= $cursor
         then . + [$row] else . end))[]
-      | .summary |= (if length > 1024 then .[:1024] + "… [summary abbreviated]" else . end)
+      | ("… [summary abbreviated; read the full outcome with bin/fm-branch-outcome.sh lookup --seqs \(.seq)]") as $note
+      | .summary |= (if length > 1024 then .[:(1024 - ($note | length))] + $note else . end)
       | . + {recordedAgo: recorded_ago}' "$STORE"
 }
 

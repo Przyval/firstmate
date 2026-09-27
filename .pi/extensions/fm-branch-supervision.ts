@@ -190,6 +190,7 @@ const PROCESSING_INSTRUCTION =
   "It was not typed by the captain. " +
   "The outcomes below are stored durably, and each was recorded earlier, possibly before a restart or a switch of primary, so the captain may already have seen it and it may already have been handled; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
   "Each outcome says what was true when it was recorded and how long ago, so check the task's current state first. " +
+  "An abbreviated line is incomplete: read the full outcome before acting on, relaying, or acknowledging it, using that line's lookup --seqs command. " +
   "First sort the outcomes by that current state into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished. " +
   "Your reply to the captain covers only the still-open outcomes: give the captain a visible response where one is due, answer or escalate a decision, or act on a blocker or failure. " +
   "Write that reply as if the settled outcomes had never been listed: leave them out entirely, without naming them, summarizing them, or saying they are settled, because checking them is all the processing they need. " +

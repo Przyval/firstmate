@@ -1457,6 +1457,44 @@ EOF
   pass "a captain outcome opens one sequence-keyed processing turn, survives empty and unrelated answers, is re-presented at run end and session start, and closes only on its acknowledgement"
 }
 
+test_abbreviated_processing_request_points_to_full_outcome() {
+  local repo home out status
+  repo="$TMP_ROOT/abbreviated-outcome-root"
+  home="$TMP_ROOT/abbreviated-outcome-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, sentToMain, mainEntries, outcomeScript, defaultSessionCtx }; })()`);
+const { fire, sentToMain, mainEntries, outcomeScript, defaultSessionCtx } = globalThis.__t;
+const summary = "begin " + "x".repeat(1100) + " decision: do not merge until approved";
+const seq = Number(outcomeScript(["append", "--task", "long-outcome", "--verdict", "captain", "--summary", summary]));
+outcomeScript(["mark-read", "--through", String(seq)]);
+mainEntries.push({ type: "custom", customType: "fm-branch-visible-outcome", data: { version: 1, seq, task: "long-outcome", verdict: "captain", summary, silent: false } });
+await fire("session_start", {}, defaultSessionCtx);
+const requests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+if (requests.length !== 1) throw new Error(`expected one processing request: ${JSON.stringify(requests)}`);
+const delivered = requests[0].message.content;
+const abbreviated = JSON.parse(outcomeScript(["unprocessed"]));
+const pointer = `bin/fm-branch-outcome.sh lookup --seqs ${seq}`;
+if (abbreviated.summary.length > 1024 || !abbreviated.summary.startsWith("begin ") || !abbreviated.summary.includes(`… [summary abbreviated; read the full outcome with ${pointer}]`)) {
+  throw new Error(`unprocessed did not bound the summary with a row-specific lookup pointer: ${abbreviated.summary}`);
+}
+if (!delivered.includes(`[seq ${seq}, recorded ${abbreviated.recordedAgo} ago] long-outcome: ${abbreviated.summary}`)) throw new Error("processing request did not carry the bounded summary and its lookup pointer");
+if (!delivered.includes("abbreviated line is incomplete") || !delivered.includes("read the full outcome before acting on, relaying, or acknowledging it")) {
+  throw new Error("delivered instruction did not require reading the full outcome first");
+}
+const full = JSON.parse(outcomeScript(["lookup", "--seqs", String(seq)]));
+if (full.seq !== seq || full.summary !== summary || abbreviated.summary.includes("decision: do not merge until approved")) throw new Error("lookup did not recover the omitted outcome detail");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "Pi must link every abbreviated processing line to the full durable outcome: $out"
+  pass "Pi: an abbreviated processing request points to the full outcome and instructs main to read it first"
+}
+
 test_large_unprocessed_backlog_replays_in_batches() {
   local repo home out status
   repo="$TMP_ROOT/large-backlog-root"
@@ -5683,6 +5721,7 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
+test_abbreviated_processing_request_points_to_full_outcome
 test_large_unprocessed_backlog_replays_in_batches
 test_undated_unprocessed_outcome_surfaces_and_stays_unprocessed
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
