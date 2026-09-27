@@ -481,7 +481,7 @@ test_default_branch_is_detected_when_branch_is_omitted() {
   local home work out
   home=$(make_home git-default)
   work=$(git_fixture git-default-repo)
-  git -C "$work" reset -q --hard HEAD~1
+  git -C "$work" reset -q --hard origin/main~1
   write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\"}}]}"
   out="$home/out.txt"
   run_check "$home" "$PATH" "$out"
@@ -732,6 +732,61 @@ test_findings_are_reported_once_until_they_change() {
   run_check "$home" "$path" "$out"
   assert_contains "$(cat "$out")" "PATH resolves 0.8.0" "a returning finding was not reported again"
   pass "the same pending update is reported once, and a change is reported again"
+}
+
+test_a_flaky_remote_does_not_repeat_a_reported_update() {
+  local home work dir out path
+  # A remote that answers on one sweep and not the next must not make the same
+  # pending update news again: an unanswered probe says nothing about the update
+  # already reported, so it must not erase the memory of that report.
+  home=$(make_home flaky)
+  work=$(git_fixture flaky-repo)
+  git -C "$work" reset -q --hard HEAD~2
+
+  # A git whose network read stalls whenever the flag file exists.
+  dir="$TMP_ROOT/flaky/bin"
+  mkdir -p "$dir"
+  cat > "$dir/git" <<SH
+#!/usr/bin/env bash
+if [ -e '$TMP_ROOT/flaky/offline' ]; then
+  for arg in "\$@"; do
+    if [ "\$arg" = ls-remote ]; then
+      sleep 30
+      exit 0
+    fi
+  done
+fi
+exec $(command -v git) "\$@"
+SH
+  chmod 0755 "$dir/git"
+  path=$(fixture_path "$dir")
+
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
+  assert_contains "$(cat "$out")" "firstmate update available" "the first sweep did not report the pending update"
+
+  touch "$TMP_ROOT/flaky/offline"
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
+  assert_contains "$(cat "$out")" "did not answer" "the first unanswered read was not reported"
+
+  rm -f "$TMP_ROOT/flaky/offline"
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
+  [ ! -s "$out" ] || fail "an update already reported was reported again after one unanswered read: $(cat "$out")"
+
+  touch "$TMP_ROOT/flaky/offline"
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
+  [ ! -s "$out" ] || fail "an unanswered read already reported was reported again: $(cat "$out")"
+
+  rm -f "$TMP_ROOT/flaky/offline"
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
+  [ ! -s "$out" ] || fail "the flapping remote kept reporting the same update: $(cat "$out")"
+
+  # A genuinely new finding for the same tool is still news.
+  git -C "$work" reset -q --hard origin/main~1
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
+  assert_contains "$(cat "$out")" "1 commit behind" "a changed update was suppressed as a repeat"
+  pass "a flaky remote does not repeat an update that was already reported"
 }
 
 test_an_overlong_report_says_it_was_cut() {
@@ -1083,6 +1138,7 @@ test_a_stalled_repository_probe_is_not_reported_as_not_a_repository
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
+test_a_flaky_remote_does_not_repeat_a_reported_update
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals

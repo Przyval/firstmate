@@ -61,11 +61,14 @@
 # refused outright.
 #
 # The report record state/.tool-updates is written only when a sweep runs to its
-# end, and it carries the whole finding set the last report was made from,
-# uncut, so the same pending update is reported once rather than on every poll
-# while a new finding that lands past the one-line cut is still news. A sweep
-# killed part way through leaves no record and is retried, instead of
-# suppressing its finding.
+# end, and it carries every finding already reported, uncut, so the same pending
+# update is reported once rather than on every poll while a new finding that
+# lands past the one-line cut is still news. A tool's reported findings are
+# forgotten only once a sweep finds nothing for it, so a check failure such as an
+# unanswered remote does not erase an update already reported, and a remote that
+# flaps between answering and not reports each finding once. A sweep killed part
+# way through leaves no record and is retried, instead of suppressing its
+# finding.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -82,6 +85,7 @@ CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 RECORD_SCHEMA=fm-tool-updates-v1
+RECORD_TAB=$'\t'
 # Wider than the digest default because one finding names two absolute paths and
 # their two versions, and several tools can report in the same sweep.
 MAX_LINE=1000
@@ -195,6 +199,8 @@ record_epoch_now() {
 real_epoch() { date +%s; }
 
 FINDINGS=
+FINDING_ITEMS=()
+TOOL_NAMES=()
 DEADLINE=0
 INCOMPLETE_REPORTED=0
 
@@ -203,6 +209,7 @@ INCOMPLETE_REPORTED=0
 emit() {
   local text
   text=$(printf '%s' "$1" | tr '\t\r\n' '   ')
+  FINDING_ITEMS+=("$text")
   if [ -z "$FINDINGS" ]; then
     FINDINGS=$text
   else
@@ -689,6 +696,67 @@ record_read() {
   return 0
 }
 
+# Reported findings are recorded tab-separated, since emit flattens tabs out of
+# every finding.
+record_has() {
+  case "$RECORD_TAB$RECORD_REPORTED$RECORD_TAB" in
+    *"$RECORD_TAB$1$RECORD_TAB"*) return 0 ;;
+  esac
+  return 1
+}
+
+findings_are_news() {
+  local item
+  for item in "${FINDING_ITEMS[@]}"; do
+    record_has "$item" || return 0
+  done
+  return 1
+}
+
+# The watched tool a finding belongs to, or nothing for a sweep-wide finding.
+finding_tool() {
+  local item=$1 name
+  for name in "${TOOL_NAMES[@]}"; do
+    case "$item" in
+      "$name "*) printf '%s' "$name"; return 0 ;;
+    esac
+  done
+}
+
+# This sweep's findings, plus each earlier reported finding of a tool that still
+# has a finding now, when either of them is a check failure. A check failure says
+# nothing about what was reported before it, so it keeps that memory; a fresh
+# answer replaces an earlier answer, so the record cannot grow without bound.
+findings_to_remember() {
+  local item prior owner out='' kept all_failed
+  local -a priors=()
+  for item in "${FINDING_ITEMS[@]}"; do
+    out="$out${out:+$RECORD_TAB}$item"
+  done
+  [ -n "$RECORD_REPORTED" ] && IFS=$RECORD_TAB read -r -a priors <<< "$RECORD_REPORTED"
+  for prior in "${priors[@]}"; do
+    [ -n "$prior" ] || continue
+    case "$RECORD_TAB$out$RECORD_TAB" in *"$RECORD_TAB$prior$RECORD_TAB"*) continue ;; esac
+    owner=$(finding_tool "$prior")
+    [ -n "$owner" ] || continue
+    kept=0
+    all_failed=1
+    for item in "${FINDING_ITEMS[@]}"; do
+      case "$item" in
+        "$owner check failed: "*) kept=1 ;;
+        "$owner "*) kept=1; all_failed=0 ;;
+      esac
+    done
+    [ "$kept" = 1 ] || continue
+    case "$prior" in
+      "$owner check failed: "*) ;;
+      *) [ "$all_failed" = 1 ] || continue ;;
+    esac
+    out="$out${out:+$RECORD_TAB}$prior"
+  done
+  printf '%s' "$out"
+}
+
 record_write() {
   local reported=$1 tmp
   tmp=$(mktemp "$RECORD.XXXXXX" 2>/dev/null) || return 1
@@ -728,6 +796,7 @@ action_check() {
   else
     while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch; do
       [ -n "$name" ] || continue
+      TOOL_NAMES+=("$name")
       budget_allows "$name" || break
       [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
       [ -z "$repo" ] || git_findings "$name" "$repo" "$remote" "$branch"
@@ -749,10 +818,10 @@ action_check() {
   #
   # Report before recording, so a record that cannot be written costs a repeated
   # report rather than a lost one.
-  if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
+  if [ -n "$line" ] && findings_are_news; then
     printf '%s\n' "$line"
   fi
-  record_write "$FINDINGS" || true
+  record_write "$(findings_to_remember)" || true
   return 0
 }
 
