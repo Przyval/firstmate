@@ -84,10 +84,11 @@
 # three sweeps in a row, once per such streak, and an answer ends the streak. A
 # sweep that runs out of time before it reached every tool counts as such a check
 # of its own, so a budget that is marginal does not wake anyone every other poll
-# either. What a check with no answer must never do is claim to know an update: a
-# command check that did not hear from every copy on PATH, whether a probe was cut
-# short or the budget ended the loop before the last copies were asked, reports no
-# update at all that sweep, because the comparison it would rest on is incomplete.
+# either. What a check with no answer must never do is claim to know an update.
+# From its first unanswered probe onwards, whether a copy was cut short, the budget
+# ended the copy loop before the last copies were asked, or the announcement source
+# never answered, that kind of check reports no update at all that sweep, because
+# every comparison it could rest on is incomplete.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -324,7 +325,7 @@ emit_no_answer() {
 # that has already gone without an answer is no answer either, however definite it
 # sounds, so it is remembered and reported as one.
 emit_failed() {
-  if [ "$(check_kind_state "$FINDING_OWNER" "$FINDING_KIND")" = answered ]; then
+  if check_kind_answered; then
     FINDING_CLASS=failure
     emit "$1 check failed: $2"
     FINDING_CLASS=answer
@@ -335,6 +336,20 @@ emit_failed() {
 
 emit_unanswered() {
   emit_no_answer "$1 check failed: $2"
+}
+
+# True while the check now running still has an answer to everything it asked.
+check_kind_answered() {
+  [ "$(check_kind_state "$FINDING_OWNER" "$FINDING_KIND")" = answered ]
+}
+
+# An update this check established, and the one gate every one of them passes: a
+# check that has gone without a single answer established nothing, because every
+# comparison it could draw rests on something it never heard, so from the first
+# unanswered probe onwards that kind of check reports no update at all this sweep.
+emit_update() {
+  check_kind_answered || return 0
+  emit "$1"
 }
 
 check_kind_index() {
@@ -607,7 +622,7 @@ probe_output() {
 command_findings() {
   local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5
   local hit out version matched announce_out status matched_line announced_version
-  local resolved_path='' resolved_version='' resolved_out='' cut_short=0
+  local resolved_path='' resolved_version='' resolved_out=''
   local best_path='' best_version='' unreadable='' hits=''
 
   # This tool's announcement source is dead if its pattern cannot be used, which
@@ -626,46 +641,37 @@ command_findings() {
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     if budget_exhausted; then
-      cut_short=1
       emit_unanswered "$name" "the time budget ran out before every copy answered"
       break
     fi
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
     out=$(probe_output "$hit" $args_joined)
     status=$?
+    version=$(parse_version "$out")
     if fm_timed_out "$status"; then
       # A copy cut short at its bound did not answer, whatever it managed to print
       # before it was cut off, so what it printed is dropped rather than read: a
       # version taken from a partial answer would credit this copy with something it
-      # never finished saying, and would leave the copy itself unreported.
-      cut_short=1
+      # never finished saying. The hang is what it is reported as, and a copy that
+      # hung is not a copy that answered without a version.
+      emit_unanswered "$name" "$hit did not answer in time"
+      version=
       out=
+    elif [ -z "$version" ]; then
+      [ -n "$unreadable" ] || unreadable=$hit
     fi
-    version=$(parse_version "$out")
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit
       resolved_version=$version
       resolved_out=$out
     fi
-    if [ -z "$version" ]; then
-      [ -n "$unreadable" ] || unreadable=$hit
-      continue
-    fi
-    if [ -z "$best_version" ] || version_newer "$version" "$best_version"; then
+    if [ -n "$version" ] && { [ -z "$best_version" ] || version_newer "$version" "$best_version"; }; then
       best_version=$version
       best_path=$hit
     fi
   done <<EOF
 $hits
 EOF
-
-  # Any copy the loop did not hear from leaves the comparison between the copies
-  # incomplete, whether its probe was cut short or the budget ended the loop before
-  # it was asked at all, so this check reached no conclusion.
-  # It still reports what it could not read, below, but it reports no update from
-  # an incomplete comparison: neither the announcement it found nor the skew
-  # between the copies that did answer.
-  [ "$cut_short" = 0 ] || check_kind_unknown
 
   if [ -n "$announce" ] && [ -n "$resolved_path" ]; then
     # A tool does not have to announce its update on the command that reports its
@@ -698,14 +704,14 @@ EOF
       status=$?
       if [ "$status" -gt 1 ]; then
         emit_failed "$name" "announce_pattern is not a usable extended regular expression"
-      elif [ "$cut_short" = 0 ] && [ -n "$matched" ]; then
+      elif [ -n "$matched" ]; then
         matched_line=$(printf '%s\n' "$matched" | head -n 1)
         announced_version=$(parse_announced_version "$matched_line")
         # An announcement naming no readable version is reported as today; one
         # naming a version already installed is not an available update.
         if [ -z "$announced_version" ] || [ -z "$best_version" ] \
           || version_newer "$announced_version" "$best_version"; then
-          emit "$name update available: $matched_line"
+          emit_update "$name update available: $matched_line"
         fi
       fi
     fi
@@ -713,14 +719,18 @@ EOF
 
   if [ -z "$resolved_version" ]; then
     # No copy was probed at all when the path is empty, and the budget report
-    # already covers that, so do not blame a copy that was never asked.
-    [ -z "$resolved_path" ] || emit_failed "$name" "$resolved_path did not report a version"
+    # already covers that, so do not blame a copy that was never asked. The copy
+    # PATH resolves is blamed for reporting no version only when it answered: one
+    # that hung is already reported above as the hang it was.
+    if [ -n "$resolved_path" ] && [ "$resolved_path" = "$unreadable" ]; then
+      emit_failed "$name" "$resolved_path did not report a version"
+    fi
     return 0
   fi
 
-  if [ "$cut_short" = 0 ] && [ -n "$best_version" ] && [ "$best_path" != "$resolved_path" ] \
+  if [ -n "$best_version" ] && [ "$best_path" != "$resolved_path" ] \
     && version_newer "$best_version" "$resolved_version"; then
-    emit "$name update not in effect: PATH resolves $resolved_version at $resolved_path but $best_version is installed at $best_path"
+    emit_update "$name update not in effect: PATH resolves $resolved_version at $resolved_path but $best_version is installed at $best_path"
   fi
 
   if [ -n "$unreadable" ]; then
@@ -867,12 +877,12 @@ git_findings() {
       ''|*[!0-9]*|0) count= ;;
     esac
     if [ -n "$count" ]; then
-      emit "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch"
+      emit_update "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch"
       return 0
     fi
   fi
 
-  emit "$name update available: $remote/$branch is at $short which this copy does not have"
+  emit_update "$name update available: $remote/$branch is at $short which this copy does not have"
   return 0
 }
 

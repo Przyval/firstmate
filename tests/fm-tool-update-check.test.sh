@@ -72,6 +72,21 @@ SH
 # partial output already in hand. A copy can fail this way for real - a version
 # banner flushed before a network lookup stalls - and the printed text is not an
 # answer, because nothing says the copy was finished talking.
+# A copy that reports its version at once and then stalls on every other command,
+# so the probe that is cut short is the one asking it to announce its update.
+make_mute_announce_copy() {
+  local dir=$1 command_name=$2 text=$3 seconds=$4
+  mkdir -p "$dir"
+  cat > "$dir/$command_name" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then
+  printf '%s\n' '$text'
+  exit 0
+fi
+sleep $seconds
+SH
+  chmod 0755 "$dir/$command_name"
+}
 make_hanging_copy() {
   local dir=$1 command_name=$2 text=$3 seconds=$4
   mkdir -p "$dir"
@@ -473,6 +488,37 @@ SH
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check failed: $dir/no-mistakes-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
   pass "an announcement probe that does not answer is reported, not read as current"
+}
+
+test_an_unanswered_announcement_withholds_the_skew_it_never_established() {
+  local home stale fresh out path i entries
+  # A check goes unanswered from whichever probe stalls first, and the announcement
+  # probe is one of them: the skew between the copies rests on a tool this check
+  # never heard out, so it is no conclusion either. Reporting it would wake the
+  # operator on every sweep with a flaky link, and each fresh text would be
+  # remembered as one more entry, which is why the newest copy here answers with a
+  # different version every sweep: any skew reported would be news rather than a
+  # repeat, and would pile up in the record.
+  home=$(make_home announce-mute-skew)
+  stale="$TMP_ROOT/announce-mute-skew/mise/installs/nm/latest/bin"
+  fresh="$TMP_ROOT/announce-mute-skew/local/bin"
+  make_mute_announce_copy "$stale" nm-fixture 'nm version v1.46.0' 30
+  write_config "$home" '{"tools":[{"name":"nm","command":"nm-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of nm is available: [^ ]+ -> [^ ]+"}]}'
+  out="$home/out.txt"
+  path=$(fixture_path "$stale:$fresh")
+
+  i=0
+  while [ "$i" -lt "$UNANSWERED_STREAK" ]; do
+    i=$((i + 1))
+    make_mute_announce_copy "$fresh" nm-fixture "nm version v1.5$i.0" 30
+    run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+    assert_not_contains "$(cat "$out")" "update not in effect" "a check whose announcement source never answered claimed to know the skew"
+  done
+
+  assert_contains "$(cat "$out")" "nm check failed: $stale/nm-fixture did not answer when asked for its update announcement" "the stalled announcement was never reported, so this case proves nothing"
+  entries=$(tr '\t' '\n' < "$home/state/.tool-updates" | grep -c 'update not in effect' || true)
+  [ "$entries" = 0 ] || fail "a check with no answer remembered $entries updates it never established"
+  pass "an unanswered announcement withholds the skew and remembers no update"
 }
 
 test_quiet_tool_with_announce_pattern_is_silent() {
@@ -970,8 +1016,8 @@ test_a_copy_that_never_answered_keeps_what_it_reported() {
   local home stale fresh out path
   # The other half of the same distinction: a copy that runs out its bound
   # answered nothing at all, so it must not settle the command check and clear
-  # the skew already reported. The message is the same either way, so only the
-  # memory tells them apart.
+  # the skew already reported. Each is reported as the thing it was, and only the
+  # memory tells apart what each one did to the skew.
   home=$(make_home unanswered-copy)
   stale="$TMP_ROOT/unanswered-copy/mise/installs/herdr/latest/bin"
   fresh="$TMP_ROOT/unanswered-copy/local/bin"
@@ -986,7 +1032,7 @@ test_a_copy_that_never_answered_keeps_what_it_reported() {
 
   make_slow_copy "$stale" "$TOOL" 30
   run_check_until_unanswered "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
-  assert_contains "$(cat "$out")" "herdr check failed: $stale/$TOOL did not report a version" "a copy that never answered was not reported"
+  assert_contains "$(cat "$out")" "herdr check failed: $stale/$TOOL did not answer in time" "a copy that never answered was not reported"
 
   make_copy "$stale" "$TOOL" 'herdr 0.8.0'
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
@@ -1198,7 +1244,7 @@ test_a_copy_cut_short_after_printing_a_version_is_still_reported() {
   path=$(fixture_path "$first:$last")
 
   run_check_until_unanswered "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
-  assert_contains "$(cat "$out")" "herdr check failed: $last/$TOOL did not report a version" "the copy that was cut short after printing was never reported, so the check went silent"
+  assert_contains "$(cat "$out")" "herdr check failed: $last/$TOOL did not answer in time" "the copy that was cut short after printing was never reported, so the check went silent"
   assert_not_contains "$(cat "$out")" "update not in effect" "a check that never heard a copy out claimed to know the skew"
   pass "a copy cut short after printing a version is reported, not read as an answer"
 }
@@ -1223,7 +1269,7 @@ test_a_copy_killed_before_it_answered_keeps_what_it_reported() {
 
   make_killed_copy "$stale" "$TOOL"
   run_check_until_unanswered "$home" "$path" "$out"
-  assert_contains "$(cat "$out")" "herdr check failed: $stale/$TOOL did not report a version" "a copy killed before it answered was not reported"
+  assert_contains "$(cat "$out")" "herdr check failed: $stale/$TOOL did not answer in time" "a copy killed before it answered was not reported"
 
   make_copy "$stale" "$TOOL" 'herdr 0.8.0'
   run_check "$home" "$path" "$out"
@@ -1755,6 +1801,7 @@ test_unusable_announce_pattern_is_reported_not_read_as_silence
 test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep
 test_an_unchecked_announcement_source_is_not_read_as_current
 test_an_announcement_probe_that_does_not_answer_is_reported
+test_an_unanswered_announcement_withholds_the_skew_it_never_established
 test_quiet_tool_with_announce_pattern_is_silent
 test_commits_behind_origin_are_reported
 test_default_branch_is_detected_when_branch_is_omitted

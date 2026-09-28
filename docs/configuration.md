@@ -1376,7 +1376,9 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
   It is reported once that kind of check for that tool has gone unanswered three sweeps in a row, once per such streak, and an answer ends the streak.
   A sweep that ran out of time before it reached every watched tool counts as such a check of its own, so a marginal budget is reported on the same terms rather than on every other poll.
   What was held back while a streak ran does not count as already reported: the same condition is still said once a sweep reaches it with an answer behind it.
-- A check with no answer never claims to know an update either: a `command` check that did not hear from every copy on PATH reports no update that sweep, whether a probe was cut short or the budget ended the loop before the last copies were asked, since the version comparison it would rest on is incomplete.
+- A check with no answer never claims to know an update either: from its first unanswered probe onwards it reports no update at all that sweep, since every comparison it could rest on is incomplete.
+  For a `command` check that covers a copy on PATH that was cut short, a budget that ended the loop before the last copies were asked, and an announcement command that was asked and never answered.
+  A copy that was cut short is reported as the copy that did not answer in time, not as one that answered without a version.
 - Of the unanswered entries one kind of check left behind, only the newest is remembered, so a check that keeps getting no answer does not grow the record one sweep at a time.
 - Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 - This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
