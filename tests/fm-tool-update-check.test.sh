@@ -914,6 +914,98 @@ test_a_copy_that_never_answered_keeps_what_it_reported() {
   pass "a copy that never answered keeps what its tool's command check reported"
 }
 
+test_a_later_copy_cut_short_keeps_what_the_command_check_reported() {
+  local home first middle last out path
+  # The copy whose probe is cut short need not be the first one that reports no
+  # version. Here an earlier copy answers with no version at all, which is an
+  # answer, while a later copy times out, which is not: the comparison between the
+  # copies is then incomplete whichever copy went quiet, so the skew already
+  # reported must survive it.
+  home=$(make_home later-cut-short)
+  first="$TMP_ROOT/later-cut-short/mise/installs/herdr/latest/bin"
+  middle="$TMP_ROOT/later-cut-short/mute/bin"
+  last="$TMP_ROOT/later-cut-short/local/bin"
+  make_copy "$first" "$TOOL" 'herdr 0.8.0'
+  make_copy "$middle" "$TOOL" 'no version here'
+  make_copy "$last" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$first:$middle:$last")
+
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_contains "$(cat "$out")" "herdr update not in effect" "the first sweep did not report the PATH skew"
+
+  # The newest copy now times out, so this sweep finds no skew at all: the copy
+  # that would have shown it never answered.
+  make_slow_copy "$last" "$TOOL" 30
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_not_contains "$(cat "$out")" "update not in effect" "a sweep whose newest copy never answered claimed to know the skew"
+
+  make_copy "$last" "$TOOL" 'herdr 0.8.2'
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  [ ! -s "$out" ] || fail "a later copy cut short erased the skew already reported, so it was reported again: $(cat "$out")"
+  pass "a copy cut short after an earlier unreadable one keeps what its command check reported"
+}
+
+test_repeated_unanswered_sweeps_keep_one_failure_per_check() {
+  local home work push dir out path i entries
+  # state/.tool-updates is this check's own record of what it already reported, and
+  # a check that keeps getting no answer keeps its memory rather than dropping it.
+  # Some unanswered texts name the remote commit they could not ask about, so a
+  # remote that keeps moving would leave one distinct entry per sweep behind
+  # forever. Only the newest failure of a kind is kept, so the record stays bounded
+  # while the update it already reported is still remembered.
+  home=$(make_home sha-bound)
+  work=$(git_fixture sha-bound-repo)
+  git -C "$work" reset -q --hard HEAD~2
+  push="$TMP_ROOT/sha-bound-push"
+  git clone -q "$TMP_ROOT/sha-bound-repo.git" "$push"
+
+  # A git whose local commit lookups stall whenever the flag file exists, so the
+  # sweep learns where the remote branch points and then runs out of answers.
+  dir="$TMP_ROOT/sha-bound/bin"
+  mkdir -p "$dir"
+  cat > "$dir/git" <<SH
+#!/usr/bin/env bash
+if [ -e '$TMP_ROOT/sha-bound/offline' ]; then
+  for arg in "\$@"; do
+    if [ "\$arg" = cat-file ]; then
+      sleep 30
+      exit 0
+    fi
+  done
+fi
+exec $(command -v git) "\$@"
+SH
+  chmod 0755 "$dir/git"
+  path=$(fixture_path "$dir")
+
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_contains "$(cat "$out")" "firstmate update available: local main is 2 commits behind origin/main" "the first sweep did not report the pending update"
+
+  touch "$TMP_ROOT/sha-bound/offline"
+  for i in 1 2 3; do
+    # Each round moves the remote branch on, so the commit the stalled probe was
+    # asked about differs every time and no two failure texts are alike.
+    printf 'more\n' > "$push/f-$i"
+    git -C "$push" add -A
+    git -C "$push" commit -qm "more $i"
+    git -C "$push" push -q origin main
+    run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+    assert_contains "$(cat "$out")" "did not answer whether it already has" "the stalled commit lookup was not reported"
+  done
+
+  entries=$(grep -o 'did not answer whether it already has' "$home/state/.tool-updates" | wc -l | tr -d ' ')
+  [ "$entries" = 1 ] \
+    || fail "three unanswered sweeps left $entries remembered failures behind instead of one"
+  entries=$(grep -o 'update available: local main is 2 commits behind' "$home/state/.tool-updates" | wc -l | tr -d ' ')
+  [ "$entries" = 1 ] \
+    || fail "the unanswered sweeps lost the update already reported, found $entries entries for it"
+  pass "repeated unanswered sweeps keep one failure per check and still remember the update"
+}
+
 test_a_copy_killed_before_it_answered_keeps_what_it_reported() {
   local home stale fresh out path
   # A probe can be cut short by a signal instead of by its own bound, which the
@@ -1123,7 +1215,7 @@ test_probes_are_skipped_between_intervals() {
   FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$now" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "first cadence run exit"
-  assert_grep 'fm-tool-updates-v2' "$home/state/.tool-updates" "the first run did not record its sweep"
+  assert_grep 'fm-tool-updates-v3' "$home/state/.tool-updates" "the first run did not record its sweep"
 
   # A finding appears, but the interval has not elapsed, so no probe runs.
   make_copy "$dir" "$TOOL" 'no version here'
@@ -1417,6 +1509,8 @@ test_an_unreachable_remote_keeps_the_update_when_the_branch_comes_from_the_remot
 test_a_failure_the_probe_answered_does_not_swallow_a_returning_finding
 test_a_copy_that_never_answered_keeps_what_it_reported
 test_a_copy_killed_before_it_answered_keeps_what_it_reported
+test_a_later_copy_cut_short_keeps_what_the_command_check_reported
+test_repeated_unanswered_sweeps_keep_one_failure_per_check
 test_the_record_is_written_under_the_system_shell
 test_one_failing_check_kind_keeps_what_the_other_kind_reported
 test_a_truncated_sweep_keeps_what_the_tools_it_missed_reported

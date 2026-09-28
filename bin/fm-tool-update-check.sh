@@ -73,8 +73,10 @@
 # be read does not erase what the command probe of the same tool answered. A
 # failure the probe did answer, such as a command that is no longer on PATH, is a
 # conclusion and settles that kind like any clean sweep does. A condition that
-# clears and later returns is news again. A sweep killed part way through leaves
-# no record and is retried, instead of suppressing its finding.
+# clears and later returns is news again. Only the newest failure of a kind is
+# kept, so a check that keeps getting no answer cannot grow the record a sweep at
+# a time. A sweep killed part way through leaves no record and is retried, instead
+# of suppressing its finding.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -90,7 +92,7 @@ CHECK_ID=tool-updates
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
-RECORD_SCHEMA=fm-tool-updates-v2
+RECORD_SCHEMA=fm-tool-updates-v3
 # One tool record per line of the registry read, and one reported finding per
 # entry of the report record, both built from fields joined with the unit
 # separator rather than a tab, because tab is IFS whitespace and `read` would
@@ -211,12 +213,14 @@ record_epoch_now() {
 real_epoch() { date +%s; }
 
 FINDINGS=
-# One entry per finding, in three parallel arrays because Bash 3.2 has no
-# associative arrays: the finding text, the watched tool it belongs to, and the
-# kind of check that produced it. A sweep-wide finding has no tool.
+# One entry per finding, in four parallel arrays because Bash 3.2 has no
+# associative arrays: the finding text, the watched tool it belongs to, the kind
+# of check that produced it, and whether it reports a check failure rather than
+# something about the tool itself. A sweep-wide finding has no tool.
 FINDING_ITEMS=()
 FINDING_OWNERS=()
 FINDING_KINDS=()
+FINDING_CLASSES=()
 # The watched tools this sweep read from the registry, and whether the sweep got
 # far enough to check each of them.
 TOOL_NAMES=()
@@ -228,9 +232,10 @@ REGISTRY_READ=0
 # pair with no entry here was never checked, which is not a conclusion either.
 CHECK_KEYS=()
 CHECK_ANSWERED=()
-# The tool and kind of check the findings being emitted belong to.
+# The tool, kind of check, and class the findings being emitted belong to.
 FINDING_OWNER=
 FINDING_KIND=sweep
+FINDING_CLASS=answer
 DEADLINE=0
 INCOMPLETE_REPORTED=0
 
@@ -244,6 +249,7 @@ emit() {
   FINDING_ITEMS+=("$text")
   FINDING_OWNERS+=("$FINDING_OWNER")
   FINDING_KINDS+=("$FINDING_KIND")
+  FINDING_CLASSES+=("$FINDING_CLASS")
   if [ -z "$FINDINGS" ]; then
     FINDINGS=$text
   else
@@ -267,7 +273,9 @@ emit_sweep() {
 # conclusion, so it settles what it reported before exactly as a clean sweep does,
 # and a condition that returns later is news again.
 emit_failed() {
+  FINDING_CLASS=failure
   emit "$1 check failed: $2"
+  FINDING_CLASS=answer
 }
 
 # A check failure that is no answer at all: a probe cut short, a remote
@@ -275,7 +283,7 @@ emit_failed() {
 # was reported for this kind of check earlier is neither confirmed nor cleared.
 emit_unanswered() {
   check_kind_unknown
-  emit "$1 check failed: $2"
+  emit_failed "$1" "$2"
 }
 
 check_kind_index() {
@@ -544,8 +552,8 @@ probe_output() {
 command_findings() {
   local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5
   local hit out version matched announce_out status matched_line announced_version
-  local resolved_path='' resolved_version='' resolved_out='' resolved_answered=1
-  local best_path='' best_version='' unreadable='' unreadable_answered=1 hits=''
+  local resolved_path='' resolved_version='' resolved_out='' cut_short=0
+  local best_path='' best_version='' unreadable='' hits=''
 
   # This tool's announcement source is dead if its pattern cannot be used, which
   # is reported here, for this tool alone, so the rest of the sweep still runs.
@@ -569,18 +577,15 @@ command_findings() {
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
     out=$(probe_output "$hit" $args_joined)
     status=$?
+    ! fm_timed_out "$status" || cut_short=1
     version=$(parse_version "$out")
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit
       resolved_version=$version
       resolved_out=$out
-      ! fm_timed_out "$status" || resolved_answered=0
     fi
     if [ -z "$version" ]; then
-      if [ -z "$unreadable" ]; then
-        unreadable=$hit
-        ! fm_timed_out "$status" || unreadable_answered=0
-      fi
+      [ -n "$unreadable" ] || unreadable=$hit
       continue
     fi
     if [ -z "$best_version" ] || version_newer "$version" "$best_version"; then
@@ -590,6 +595,10 @@ command_findings() {
   done <<EOF
 $hits
 EOF
+
+  # Any copy whose probe was cut short leaves the comparison between the copies
+  # incomplete, whichever copy it was, so this check reached no conclusion at all.
+  [ "$cut_short" = 0 ] || check_kind_unknown
 
   if [ -n "$announce" ] && [ -n "$resolved_path" ]; then
     # A tool does not have to announce its update on the command that reports its
@@ -637,17 +646,8 @@ EOF
 
   if [ -z "$resolved_version" ]; then
     # No copy was probed at all when the path is empty, and the budget report
-    # already covers that, so do not blame a copy that was never asked. A copy
-    # whose probe was cut short answered nothing, while one that answered without
-    # a version did answer, and only the first leaves this check without a
-    # conclusion.
-    if [ -n "$resolved_path" ]; then
-      if [ "$resolved_answered" = 1 ]; then
-        emit_failed "$name" "$resolved_path did not report a version"
-      else
-        emit_unanswered "$name" "$resolved_path did not report a version"
-      fi
-    fi
+    # already covers that, so do not blame a copy that was never asked.
+    [ -z "$resolved_path" ] || emit_failed "$name" "$resolved_path did not report a version"
     return 0
   fi
 
@@ -657,11 +657,7 @@ EOF
   fi
 
   if [ -n "$unreadable" ]; then
-    if [ "$unreadable_answered" = 1 ]; then
-      emit_failed "$name" "$unreadable did not report a version"
-    else
-      emit_unanswered "$name" "$unreadable did not report a version"
-    fi
+    emit_failed "$name" "$unreadable did not report a version"
   fi
   return 0
 }
@@ -816,22 +812,24 @@ git_findings() {
 # --- report record ----------------------------------------------------------
 
 RECORD_EPOCH=0
-# The findings the record says were already reported, in three parallel arrays
-# shaped exactly like this sweep's own: text, tool, and kind of check.
+# The findings the record says were already reported, in four parallel arrays
+# shaped exactly like this sweep's own: text, tool, kind of check, and class.
 RECORD_TEXTS=()
 RECORD_OWNERS=()
 RECORD_KINDS=()
+RECORD_CLASSES=()
 
 # Every array is indexed by hand rather than expanded with [@], because an empty
 # array expanded that way is a fatal unbound variable under `set -u` on Bash 3.2,
 # which is still the stock shell on macOS.
 record_read() {
-  local line first=1 entry owner kind text i
+  local line first=1 entry owner kind class text i
   local -a entries=()
   RECORD_EPOCH=0
   RECORD_TEXTS=()
   RECORD_OWNERS=()
   RECORD_KINDS=()
+  RECORD_CLASSES=()
   [ -f "$RECORD" ] || return 0
   while IFS= read -r line; do
     if [ "$first" = 1 ]; then
@@ -855,10 +853,11 @@ record_read() {
         while [ "$i" -lt "${#entries[@]}" ]; do
           entry=${entries[i]}
           i=$((i + 1))
-          IFS=$FIELD_SEP read -r owner kind text <<< "$entry"
+          IFS=$FIELD_SEP read -r owner kind class text <<< "$entry"
           [ -n "$text" ] || continue
           RECORD_OWNERS+=("$owner")
           RECORD_KINDS+=("$kind")
+          RECORD_CLASSES+=("$class")
           RECORD_TEXTS+=("$text")
         done
         ;;
@@ -914,24 +913,49 @@ prior_is_unsettled() {
   return 0
 }
 
+# True unless this tool and kind of check already has the one failure it is
+# allowed to remember. Record order runs newest first, so the failure this sweep
+# reported wins, and the newest earlier one wins after that.
+failure_cap_allows() {
+  local class=$1 owner=$2 kind=$3 capped=$4
+  [ "$class" = failure ] || return 0
+  case " $capped " in
+    *" $owner$FIELD_SEP$kind "*) return 1 ;;
+  esac
+  return 0
+}
+
 # This sweep's findings, plus each earlier reported finding it left unsettled. A
 # check that got no answer says nothing about what was reported before it, so it
 # keeps that memory; a check that did answer replaces its own earlier findings,
 # whether those were updates or failures it answered, so a condition that returns
-# later is news again and the record cannot grow without bound.
+# later is news again.
+#
+# Of the failures a kind reported, only the newest is kept, because a check that
+# keeps getting no answer would otherwise leave one entry per sweep behind: some
+# failure texts name the remote commit they could not ask about, so a remote that
+# moves makes every one of them distinct. The findings a check answered are
+# untouched by that cap, and they cannot pile up: a kind that answers replaces all
+# of its own, and one that does not answer emits none.
 findings_to_remember() {
-  local i out='' text
+  local i out='' text capped=''
   i=0
   while [ "$i" -lt "${#FINDING_ITEMS[@]}" ]; do
-    out="$out${out:+$RECORD_TAB}${FINDING_OWNERS[i]}$FIELD_SEP${FINDING_KINDS[i]}$FIELD_SEP${FINDING_ITEMS[i]}"
+    out="$out${out:+$RECORD_TAB}${FINDING_OWNERS[i]}$FIELD_SEP${FINDING_KINDS[i]}$FIELD_SEP${FINDING_CLASSES[i]}$FIELD_SEP${FINDING_ITEMS[i]}"
+    if [ "${FINDING_CLASSES[i]}" = failure ]; then
+      capped="$capped ${FINDING_OWNERS[i]}$FIELD_SEP${FINDING_KINDS[i]}"
+    fi
     i=$((i + 1))
   done
   i=0
   while [ "$i" -lt "${#RECORD_TEXTS[@]}" ]; do
     text=${RECORD_TEXTS[i]}
     if ! finding_was_emitted "$text" \
-      && prior_is_unsettled "${RECORD_OWNERS[i]}" "${RECORD_KINDS[i]}"; then
-      out="$out${out:+$RECORD_TAB}${RECORD_OWNERS[i]}$FIELD_SEP${RECORD_KINDS[i]}$FIELD_SEP$text"
+      && prior_is_unsettled "${RECORD_OWNERS[i]}" "${RECORD_KINDS[i]}" \
+      && failure_cap_allows "${RECORD_CLASSES[i]}" "${RECORD_OWNERS[i]}" "${RECORD_KINDS[i]}" "$capped"; then
+      [ "${RECORD_CLASSES[i]}" != failure ] \
+        || capped="$capped ${RECORD_OWNERS[i]}$FIELD_SEP${RECORD_KINDS[i]}"
+      out="$out${out:+$RECORD_TAB}${RECORD_OWNERS[i]}$FIELD_SEP${RECORD_KINDS[i]}$FIELD_SEP${RECORD_CLASSES[i]}$FIELD_SEP$text"
     fi
     i=$((i + 1))
   done
