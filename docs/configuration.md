@@ -1354,6 +1354,7 @@ This section is the single owner of the canonical schema.
 - An omitted `branch` uses the remote's default branch, taken from the clone's own record of it and otherwise asked of the remote directly, so a `--single-branch` clone still resolves.
 
 Both probe kinds are read-only and bounded, and a probe that cannot answer is reported as a check failure rather than assumed current.
+A failure the probe itself answered is reported on the sweep it happens; one where nothing answered at all waits for the streak described under "Repeat reporting and inheritance" below.
 See [`docs/examples/watched-tools.json`](examples/watched-tools.json) for a starting point to copy into local `config/watched-tools.json`.
 
 **Arm, edit, and disarm**
