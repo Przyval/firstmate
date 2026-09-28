@@ -1271,6 +1271,59 @@ SH
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   assert_refused_without_mutation "$dir" "$new" "shared slot whose other record states two kinds"
 
+  # An appended path line can add a slot a record names, never erase one. The
+  # operator "reconciling" the other record by appending a corrected worktree=
+  # line must not make this teardown see a sole-record slot and return it.
+  dir=$(make_case slot-shared-other-worktree-appended)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/elsewhere"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "worktree=$dir/elsewhere" \
+    "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot the other record still names in an earlier worktree line"
+  assert_present "$dir/worktree/sentinel" "the hidden collision let the slot be reset"
+  assert_contains "$(cat "$dir/stderr")" "is also task $old's recorded worktree" \
+    "the refusal should name the record that still points at the slot"
+
+  # Same rule for the home= field, which the header promises always refuses.
+  dir=$(make_case slot-shared-other-home-appended)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/elsewhere"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "home=$dir/worktree" "home=$dir/elsewhere" \
+    "worktree=$dir/elsewhere" "project=$dir/project" "kind=secondmate"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot the other record still names in an earlier home line"
+  assert_contains "$(cat "$dir/stderr")" "is also task $old's recorded home" \
+    "the refusal should name the home collision"
+
+  # Both endpoints gone and no claim: the pair is only clearable later-record
+  # first, so the earlier record's refusal must say which one to tear down.
+  dir=$(make_case slot-shared-both-gone-earlier-first)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" someone-else
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$old" "earlier-stamped record on a shared slot whose endpoints are both gone"
+  assert_contains "$(cat "$dir/stderr")" "tear $new down first" \
+    "the refusal should name the later-stamped record to tear down first"
+  # And that order does clear the pair, exactly as the refusal advises.
+  run_case "$dir" "$new" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the advised order refused: $(cat "$dir/stderr")"
+  run_case "$dir" "$old" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the earlier record still refused after the advised order: $(cat "$dir/stderr")"
+
   pass "fm-teardown: two task records on one pool slot resolve by handout order instead of refusing each other"
 }
 

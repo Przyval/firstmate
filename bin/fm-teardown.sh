@@ -115,7 +115,12 @@
 # whose metadata provably binds that endpoint to that task - the same validation
 # this teardown's own endpoint passes; a record that states two windows, two
 # worktrees, or an endpoint bound to another task reads 'unverified' and settles
-# nothing, as does a record that does not state exactly one kind.
+# nothing, as does a record that states two or more kinds (a record that states
+# none is a ship task, as everywhere else here). The scan matches the slot
+# against every worktree= and home= value a record states, not just its last:
+# an appended line can add a path a record names, never erase one it named
+# already. When the pair cannot be resolved the refusal names the record to tear
+# down first whenever the stamps put one after the other.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2395,8 +2400,9 @@ record_validated_agent_state() {  # <meta> <id>
   fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET"
 }
 
-# Kind of a record, reported as secondmate whenever the record does not state
-# exactly one, so an ambiguously typed record never reaches slot resolution.
+# Kind of a record, reported as secondmate when the record states two or more,
+# so an ambiguously typed record never reaches slot resolution. A record that
+# states none is a ship task, the default every other reader here applies.
 record_exclusive_kind() {  # <meta>
   local count
   count=$(grep -c '^kind=' "$1" 2>/dev/null || true)
@@ -2405,6 +2411,20 @@ record_exclusive_kind() {  # <meta>
     1) fm_meta_get "$1" kind ;;
     *) printf 'secondmate' ;;
   esac
+}
+
+# True when a record states <slot> in ANY value of <field>. An appended line can
+# add a path a record names, never erase one it named already, so the collision
+# is matched against every value rather than only the last.
+record_field_names_slot() {  # <meta> <field> <slot>
+  local value resolved
+  while IFS= read -r value || [ -n "$value" ]; do
+    [ -n "$value" ] || continue
+    resolved=$(canonical_existing_dir "$value") || continue
+    [ "$resolved" = "$3" ] || continue
+    return 0
+  done < <(LC_ALL=C grep "^$2=" "$1" 2>/dev/null | cut -d= -f2-)
+  return 1
 }
 
 record_spawn_epoch() {  # <meta>
@@ -2425,7 +2445,7 @@ record_spawn_epoch() {  # <meta>
 # the newer task) when another record proves this one is the stale holder.
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot state_dir other other_id field order_hint
   local claim own_epoch other_epoch other_kind other_endpoint own_endpoint
   slot=$(canonical_existing_dir "$worktree") || return 0
   # The slot's own claim, when present, names the task that took it last, which
@@ -2445,10 +2465,8 @@ require_exclusive_worktree_slot_record() {
       [ "${other##*/}" = "${record_meta##*/}" ] && [ "$other" -ef "$record_meta" ] && continue
       other_id=$(basename "$other" .meta)
       for field in worktree home; do
-        other_path=$(fm_meta_get "$other" "$field")
-        [ -n "$other_path" ] || continue
-        other_slot=$(canonical_existing_dir "$other_path") || continue
-        [ "$other_slot" = "$slot" ] || continue
+        record_field_names_slot "$other" "$field" "$slot" || continue
+        order_hint=
         other_kind=$(record_exclusive_kind "$other")
         if [ "$field" = worktree ] && [ "$other_kind" != secondmate ]; then
           # This task's own claim proves outright that the other record on the
@@ -2511,11 +2529,15 @@ require_exclusive_worktree_slot_record() {
                 echo "warning: task $record_id's recorded worktree $slot is also task $other_id's, which was spawned after $record_id and whose endpoint reads 'alive' while $record_id's reads '$own_endpoint'; that slot is $other_id's now, so its processes, copy, and claim are left untouched and only $record_id's own cleanup runs." >&2
                 return "$TEARDOWN_SLOT_REASSIGNED_RC"
                 ;;
+              dead:dead|dead:missing|missing:dead|missing:missing)
+                order_hint="Both endpoints are already gone, and task $other_id was spawned after $record_id, so tear $other_id down first and then re-run this teardown for $record_id."
+                ;;
             esac
           fi
         fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
+        [ -z "$order_hint" ] || echo "$order_hint" >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
         return 1
       done
