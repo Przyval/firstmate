@@ -1,0 +1,29 @@
+=== BASE 022250d (before the fix) ===
+sweep 1 (network up  ): tool updates: firstmate update available: local main is 2 commits behind origin/main
+sweep 2 (network up  ): (nothing shown to the operator)
+sweep 3 (network down): tool updates: firstmate check failed: origin could not be reached or read from <repo>
+sweep 4 (network down): (nothing shown to the operator)
+sweep 5 (network up  ): tool updates: firstmate update available: local main is 2 commits behind origin/main
+sweep 6 (network down): tool updates: firstmate check failed: origin could not be reached or read from <repo>
+sweep 7 (network up  ): tool updates: firstmate update available: local main is 2 commits behind origin/main
+sweep 8 (network up  ): (nothing shown to the operator)
+-- 5 notice(s) shown across 8 sweeps for one unchanged pending update
+
+=== HEAD fa52bfd (after the fix) ===
+sweep 1 (network up  ): tool updates: firstmate update available: local main is 2 commits behind origin/main
+sweep 2 (network up  ): (nothing shown to the operator)
+sweep 3 (network down): (nothing shown to the operator)
+sweep 4 (network down): (nothing shown to the operator)
+sweep 5 (network up  ): (nothing shown to the operator)
+sweep 6 (network down): (nothing shown to the operator)
+sweep 7 (network up  ): (nothing shown to the operator)
+sweep 8 (network up  ): (nothing shown to the operator)
+-- 1 notice(s) shown across 8 sweeps for one unchanged pending update
+
+=== still reports real news (HEAD) ===
+network up, update pending:        tool updates: firstmate update available: local main is 2 commits behind origin/main
+outage sweep 1:                    (nothing shown to the operator)
+outage sweep 2:                    (nothing shown to the operator)
+outage sweep 3:                    tool updates: firstmate check failed: origin could not be reached or read from <repo>
+outage sweep 4:                    (nothing shown to the operator)
+network back, update changed:      tool updates: firstmate update available: local main is 1 commit behind origin/main
