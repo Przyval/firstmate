@@ -633,7 +633,14 @@ command_findings() {
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
     out=$(probe_output "$hit" $args_joined)
     status=$?
-    ! fm_timed_out "$status" || cut_short=1
+    if fm_timed_out "$status"; then
+      # A copy cut short at its bound did not answer, whatever it managed to print
+      # before it was cut off, so what it printed is dropped rather than read: a
+      # version taken from a partial answer would credit this copy with something it
+      # never finished saying, and would leave the copy itself unreported.
+      cut_short=1
+      out=
+    fi
     version=$(parse_version "$out")
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit

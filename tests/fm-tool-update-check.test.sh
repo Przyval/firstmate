@@ -67,6 +67,22 @@ SH
   chmod 0755 "$dir/$command_name"
 }
 
+# make_hanging_copy <dir> <command> <version-output> <seconds>: a copy that prints
+# what looks like a whole answer and then hangs, so its probe is cut short with its
+# partial output already in hand. A copy can fail this way for real - a version
+# banner flushed before a network lookup stalls - and the printed text is not an
+# answer, because nothing says the copy was finished talking.
+make_hanging_copy() {
+  local dir=$1 command_name=$2 text=$3 seconds=$4
+  mkdir -p "$dir"
+  cat > "$dir/$command_name" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '$text'
+sleep $seconds
+SH
+  chmod 0755 "$dir/$command_name"
+}
+
 # make_killed_copy <dir> <command>: a copy that is killed before it can answer, so
 # a case can exercise a probe cut short by a signal rather than by its own bound.
 # The bounded runner reports that as 128 plus the signal, not as its timeout
@@ -1164,6 +1180,29 @@ test_a_cut_short_command_check_reports_no_update() {
   pass "a command check cut short reports no update, and remembers no new one"
 }
 
+test_a_copy_cut_short_after_printing_a_version_is_still_reported() {
+  local home first last out path
+  # A copy can print what looks like a whole version and then hang, so its probe is
+  # cut short with that text already captured. Reading a version out of it would
+  # credit the copy with an answer it never finished, and would leave nothing at all
+  # to report: the skew is withheld from an incomplete comparison, so if that copy
+  # also counted as answered the check would go silent with no way back. It must say
+  # it had no answer from that copy instead.
+  home=$(make_home cut-after-printing)
+  first="$TMP_ROOT/cut-after-printing/mise/installs/herdr/latest/bin"
+  last="$TMP_ROOT/cut-after-printing/local/bin"
+  make_copy "$first" "$TOOL" 'herdr 0.8.0'
+  make_hanging_copy "$last" "$TOOL" 'herdr 0.9.0' 30
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$first:$last")
+
+  run_check_until_unanswered "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_contains "$(cat "$out")" "herdr check failed: $last/$TOOL did not report a version" "the copy that was cut short after printing was never reported, so the check went silent"
+  assert_not_contains "$(cat "$out")" "update not in effect" "a check that never heard a copy out claimed to know the skew"
+  pass "a copy cut short after printing a version is reported, not read as an answer"
+}
+
 test_a_copy_killed_before_it_answered_keeps_what_it_reported() {
   local home stale fresh out path
   # A probe can be cut short by a signal instead of by its own bound, which the
@@ -1736,6 +1775,7 @@ test_an_unreachable_remote_keeps_the_update_when_the_branch_comes_from_the_remot
 test_a_failure_the_probe_answered_does_not_swallow_a_returning_finding
 test_a_copy_that_never_answered_keeps_what_it_reported
 test_a_copy_killed_before_it_answered_keeps_what_it_reported
+test_a_copy_cut_short_after_printing_a_version_is_still_reported
 test_a_sweep_with_no_answer_keeps_a_failure_the_probe_answered
 test_a_failure_held_back_as_unanswered_is_reported_once_the_check_answers
 test_a_cut_short_command_check_reports_no_update
