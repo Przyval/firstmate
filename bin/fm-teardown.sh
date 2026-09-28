@@ -4012,11 +4012,13 @@ fi
 if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
-if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
-  echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
-elif teardown_owns_worktree; then
-  echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
+if teardown_owns_worktree; then
+  TEARDOWN_COMPLETION_DETAIL=", worktree $WT"
 else
-  echo "teardown $ID complete (window ${T:-none}; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
+  TEARDOWN_COMPLETION_DETAIL="; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to"
 fi
+if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
+  TEARDOWN_COMPLETION_DETAIL="$TEARDOWN_COMPLETION_DETAIL, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN"
+fi
+echo "teardown $ID complete (window ${T:-none}$TEARDOWN_COMPLETION_DETAIL)"
 backlog_refresh_reminder

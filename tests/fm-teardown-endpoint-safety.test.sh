@@ -81,11 +81,12 @@ SH
   printf 'fm-%s\n' "$@" > "$dir/tmux-windows"
 }
 
-run_case() {  # <case> <id>
+run_case() {  # <case> <id> [extra-arg...]
   local dir=$1 id=$2
+  shift 2
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
   FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-    "$TEARDOWN" "$id" --force
+    "$TEARDOWN" "$id" --force "$@"
 }
 
 assert_refused_without_mutation() {  # <case> <id> <description>
@@ -1332,6 +1333,45 @@ SH
 # already pruned: the holder is processed first (glob order), and the stale child
 # would then find no other record naming its slot and return the holder's slot a
 # second time. The verdicts come from the preflight, taken before any removal.
+# A legacy record can be accepted (no spawn_gen, endpoint confirmed gone) and
+# have its slot left to the task it was reassigned to, on the same two facts.
+# The completion line must then report the slot as left behind, never as this
+# task's worktree.
+test_legacy_acceptance_still_reports_the_slot_it_left_behind() {
+  local dir old=legacy-ship new=new-scout out
+
+  dir=$(make_case slot-shared-legacy-completion)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" someone-else
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$dir/home/data/backlog.md"
+  tasks-axi add "$old" "legacy slot fixture" --kind ship \
+    --file "$dir/home/data/backlog.md" >/dev/null
+  tasks-axi start "$old" --file "$dir/home/data/backlog.md" >/dev/null
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "mode=local-only"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  out=$(run_case "$dir" "$old" --legacy-record 2> "$dir/stderr") \
+    || fail "teardown of the accepted legacy record refused: $(cat "$dir/stderr")"
+  assert_contains "$out" "pool slot $dir/worktree left to task $new" \
+    "the completion line did not report the slot as left to the other task"
+  assert_contains "$out" "legacy record accepted without spawn_gen" \
+    "the completion line dropped the legacy acceptance detail"
+  ! printf '%s\n' "$out" | grep -Fq ", worktree $dir/worktree" \
+    || fail "the completion line still claimed the reassigned slot as its worktree: $out"
+  assert_present "$dir/worktree/sentinel" "the reassigned slot was reset anyway"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the reassigned slot was returned anyway: $(cat "$dir/runtime.log")"
+  assert_absent "$dir/home/state/$old.meta" "the legacy record was not removed"
+  assert_present "$dir/home/state/$new.meta" "the holder's record was removed"
+
+  pass "fm-teardown: an accepted legacy record still reports the pool slot it left to another task"
+}
+
 test_forced_child_slot_verdicts_survive_sibling_record_removal() {
   local dir mate parent=mate-task old=old-scout new=new-scout rc returns
   dir=$(make_case secondmate-child-shared-slot)
@@ -1790,6 +1830,7 @@ test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_shared_slot_records_resolve_by_handout_order
 test_forced_child_slot_verdicts_survive_sibling_record_removal
+test_legacy_acceptance_still_reports_the_slot_it_left_behind
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
