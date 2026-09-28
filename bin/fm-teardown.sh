@@ -88,11 +88,16 @@
 # in its worktree= or home=. One live path with two task records is the reuse
 # collision itself. The pane-driven `treehouse get` holds only a process lease,
 # so a finished task whose worker exited while its record was kept (a paused or
-# held scout) leaves a slot the pool hands to the next spawn. Prevention for
-# slots taken from now on is the claim bin/fm-spawn.sh writes under the project
-# lock at the moment it takes one; what follows reconciles the legacy pairs left
-# by slots taken before that claim existed, so they can be cleaned up instead of
-# refusing each other forever. spawn_gen is an incarnation stamp, not a handout
+# held scout) leaves a slot the pool hands to the next spawn. Nothing here stops
+# that handout. The claim bin/fm-spawn.sh writes under the project lock at the
+# moment it takes a slot is read by teardown alone, so it makes the collision
+# detectable and reconcilable, not impossible; preventing the handout means
+# moving crewmate spawns off the pane-driven `treehouse get` and onto the
+# durable `treehouse get --lease --lease-holder`, which bin/fm-wake-lib.sh
+# records as separate follow-up work. What follows reconciles the pairs that
+# reuse leaves behind, including those on slots taken before the claim existed,
+# so they can be cleaned up instead of refusing each other forever.
+# spawn_gen is an incarnation stamp, not a handout
 # time - a relaunch re-stamps a record without re-allocating its slot - so it
 # never settles a pair on its own in either direction. Two crewmate records on
 # one slot resolve only on positive evidence: the slot's claim naming this task
@@ -119,8 +124,9 @@
 # none is a ship task, as everywhere else here). The scan matches the slot
 # against every worktree= and home= value a record states, not just its last:
 # an appended line can add a path a record names, never erase one it named
-# already. When the pair cannot be resolved the refusal names the record to tear
-# down first whenever the stamps put one after the other.
+# already. One refusal carries an order hint: an earlier-stamped record whose
+# own endpoint and the later record's both read dead or missing names that later
+# record as the one to tear down first. Every other refusal carries none.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
