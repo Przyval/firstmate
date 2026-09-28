@@ -1037,11 +1037,10 @@ prior_is_unsettled() {
   return 0
 }
 
-# True unless this tool and kind of check already has the one unanswered entry it
-# is allowed to remember. Record order runs newest first, so the one this sweep
-# reported wins, and the newest earlier one wins after that. Only unanswered
-# entries are capped, so a no-answer sweep never evicts a failure some probe did
-# answer.
+# True unless this tool and kind of check has already carried over the one earlier
+# unanswered entry it is allowed to keep. Record order runs newest first, so the
+# newest earlier one wins. Only unanswered entries are capped, so a no-answer sweep
+# never evicts a failure some probe did answer.
 unanswered_cap_allows() {
   local class=$1 owner=$2 kind=$3 capped=$4
   [ "$class" = unanswered ] || return 0
@@ -1057,10 +1056,16 @@ unanswered_cap_allows() {
 # whether those were updates or failures it answered, so a condition that returns
 # later is news again.
 #
-# Of the unanswered entries a kind left behind, only the newest is kept, because a
-# check that keeps getting no answer would otherwise leave one per sweep behind:
-# some of those texts name the remote commit they could not ask about, so a remote
-# that moves makes every one of them distinct. Nothing else can pile up: a kind
+# Of the unanswered entries earlier sweeps of a kind left behind, only the newest
+# is kept, because a check that keeps getting no answer would otherwise leave one
+# per sweep behind: some of those texts name the remote commit they could not ask
+# about, so a remote that moves makes every one of them distinct. This sweep's own
+# findings are all kept, however many dead ends one kind reached - a copy that hung
+# and an announcement command that never answered are two of the same kind having
+# no answer - because this record is also what remembers which findings the
+# operator has already been shown, and dropping one would report it again the
+# moment its check answers. That bounds the record by what a single sweep can find,
+# not by how long a check has gone unanswered. Nothing else can pile up: a kind
 # that answers replaces all of its own entries, and one that does not answer
 # reports no update at all, only that it has no answer.
 #

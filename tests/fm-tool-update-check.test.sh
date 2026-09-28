@@ -167,8 +167,11 @@ run_check_until_unanswered() {
     run_check "$home" "$path" "$out" "$@"
     if [ "$i" -lt "$UNANSWERED_STREAK" ] && [ -s "$out" ]; then
       # An earlier sweep of the streak spoke, which means what it reported was
-      # not held back as an unanswered condition at all.
-      return 0
+      # never held back as an unanswered condition at all. Failing here rather
+      # than handing that early output to the case is what makes the cases that
+      # assert on <out> proof of the delay: a build that reports an unanswered
+      # check on its first sweep prints the same text, and would otherwise pass.
+      fail "sweep $i of $UNANSWERED_STREAK reported '$(cat "$out")' instead of holding it back until the streak ran out"
     fi
   done
 }
@@ -1134,6 +1137,42 @@ SH
   pass "repeated unanswered sweeps keep one failure per check and still remember the update"
 }
 
+test_two_dead_ends_in_one_sweep_are_reported_once_each() {
+  local home first second out path report entries
+  # One kind of check can reach more than one dead end in a single sweep: two copies
+  # of the same command on PATH that both hang are two unanswered findings of that
+  # tool's command check. Both are conditions of this sweep, so both are said, and
+  # both have to be remembered as said: the cap that keeps one unanswered entry per
+  # kind is about what earlier sweeps left behind, and were it to drop one of these
+  # instead, that one would be reported all over again the next time this check has
+  # an answer.
+  home=$(make_home twin-dead-ends)
+  first="$TMP_ROOT/twin-dead-ends/first/bin"
+  second="$TMP_ROOT/twin-dead-ends/second/bin"
+  make_slow_copy "$first" "$TOOL" 30
+  make_slow_copy "$second" "$TOOL" 30
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$first:$second")
+
+  run_check_until_unanswered "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  report=$(cat "$out")
+  assert_contains "$report" "$first/$TOOL did not answer in time" "the first hung copy was not reported once the streak ran out"
+  assert_contains "$report" "$second/$TOOL did not answer in time" "the second hung copy was dropped from the report, so only one dead end of the sweep was said"
+
+  # Both were said, so neither is news again. The second copy answers from here on,
+  # which gives the check an answer and is the sweep that would repeat the first
+  # copy's hang if the record had only kept one of the two.
+  make_copy "$second" "$TOOL" 'herdr 0.8.2'
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_not_contains "$(cat "$out")" "$first/$TOOL did not answer in time" "a dead end the sweep had already reported was reported again once the check answered"
+
+  entries=$(grep -o "$first/$TOOL did not answer in time" "$home/state/.tool-updates" | wc -l | tr -d ' ')
+  [ "$entries" = 1 ] \
+    || fail "the still-hanging copy is remembered $entries times instead of once"
+  pass "two dead ends in one sweep are each reported once"
+}
+
 test_a_failure_held_back_as_unanswered_is_reported_once_the_check_answers() {
   local home first second out path
   # A finding the streak gate held back was never shown, so it must not pass for
@@ -1825,6 +1864,7 @@ test_a_copy_killed_before_it_answered_keeps_what_it_reported
 test_a_copy_cut_short_after_printing_a_version_is_still_reported
 test_a_sweep_with_no_answer_keeps_a_failure_the_probe_answered
 test_a_failure_held_back_as_unanswered_is_reported_once_the_check_answers
+test_two_dead_ends_in_one_sweep_are_reported_once_each
 test_a_cut_short_command_check_reports_no_update
 test_a_later_copy_cut_short_keeps_what_the_command_check_reported
 test_repeated_unanswered_sweeps_keep_one_failure_per_check
