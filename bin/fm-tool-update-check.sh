@@ -103,7 +103,7 @@ CHECK_ID=tool-updates
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
-RECORD_SCHEMA=fm-tool-updates-v4
+RECORD_SCHEMA=fm-tool-updates-v5
 # One tool record per line of the registry read, and one reported finding per
 # entry of the report record, both built from fields joined with the unit
 # separator rather than a tab, because tab is IFS whitespace and `read` would
@@ -872,20 +872,22 @@ git_findings() {
 # --- report record ----------------------------------------------------------
 
 RECORD_EPOCH=0
-# The findings the record says were already reported, in five parallel arrays
-# shaped exactly like this sweep's own: text, tool, kind of check, class, and
-# unanswered streak.
+# The findings the record carries, in six parallel arrays shaped like this sweep's
+# own: text, tool, kind of check, class, unanswered streak, and whether the finding
+# was ever actually printed. The last one is what "already reported" means, because
+# a finding the streak gate held back is remembered without having been shown.
 RECORD_TEXTS=()
 RECORD_OWNERS=()
 RECORD_KINDS=()
 RECORD_CLASSES=()
 RECORD_STREAKS=()
+RECORD_SHOWN=()
 
 # Every array is indexed by hand rather than expanded with [@], because an empty
 # array expanded that way is a fatal unbound variable under `set -u` on Bash 3.2,
 # which is still the stock shell on macOS.
 record_read() {
-  local line first=1 entry owner kind class streak text i
+  local line first=1 entry owner kind class streak shown text i
   local -a entries=()
   RECORD_EPOCH=0
   RECORD_TEXTS=()
@@ -893,6 +895,7 @@ record_read() {
   RECORD_KINDS=()
   RECORD_CLASSES=()
   RECORD_STREAKS=()
+  RECORD_SHOWN=()
   [ -f "$RECORD" ] || return 0
   while IFS= read -r line; do
     if [ "$first" = 1 ]; then
@@ -916,15 +919,17 @@ record_read() {
         while [ "$i" -lt "${#entries[@]}" ]; do
           entry=${entries[i]}
           i=$((i + 1))
-          IFS=$FIELD_SEP read -r owner kind class streak text <<< "$entry"
+          IFS=$FIELD_SEP read -r owner kind class streak shown text <<< "$entry"
           [ -n "$text" ] || continue
           case "$streak" in
             ''|*[!0-9]*) streak=0 ;;
           esac
+          [ "$shown" = 1 ] || shown=0
           RECORD_OWNERS+=("$owner")
           RECORD_KINDS+=("$kind")
           RECORD_CLASSES+=("$class")
           RECORD_STREAKS+=("$streak")
+          RECORD_SHOWN+=("$shown")
           RECORD_TEXTS+=("$text")
         done
         ;;
@@ -933,10 +938,15 @@ record_read() {
   return 0
 }
 
+# Whether this text was already reported, which is not the same as being in the
+# record: a finding the streak gate held back is remembered without having been
+# shown, and must still be said once a sweep reaches it with an answer behind it.
 record_has() {
   local i=0
   while [ "$i" -lt "${#RECORD_TEXTS[@]}" ]; do
-    [ "${RECORD_TEXTS[i]}" = "$1" ] && return 0
+    if [ "${RECORD_TEXTS[i]}" = "$1" ] && [ "${RECORD_SHOWN[i]}" = 1 ]; then
+      return 0
+    fi
     i=$((i + 1))
   done
   return 1
@@ -1036,11 +1046,18 @@ unanswered_cap_allows() {
 # that moves makes every one of them distinct. Nothing else can pile up: a kind
 # that answers replaces all of its own entries, and one that does not answer
 # reports no update at all, only that it has no answer.
+#
+# Each finding of this sweep is marked shown when this sweep printed, and stays
+# marked once it was, so a finding held back while its streak ran does not pass for
+# one the operator has seen, and one that was shown does not become news again
+# because a later sweep had no answer about it.
 findings_to_remember() {
-  local i out='' text capped=''
+  local printed=$1 i out='' text shown capped=''
   i=0
   while [ "$i" -lt "${#FINDING_ITEMS[@]}" ]; do
-    out="$out${out:+$RECORD_TAB}${FINDING_OWNERS[i]}$FIELD_SEP${FINDING_KINDS[i]}$FIELD_SEP${FINDING_CLASSES[i]}$FIELD_SEP${FINDING_STREAKS[i]}$FIELD_SEP${FINDING_ITEMS[i]}"
+    shown=$printed
+    ! record_has "${FINDING_ITEMS[i]}" || shown=1
+    out="$out${out:+$RECORD_TAB}${FINDING_OWNERS[i]}$FIELD_SEP${FINDING_KINDS[i]}$FIELD_SEP${FINDING_CLASSES[i]}$FIELD_SEP${FINDING_STREAKS[i]}$FIELD_SEP$shown$FIELD_SEP${FINDING_ITEMS[i]}"
     if [ "${FINDING_CLASSES[i]}" = unanswered ]; then
       capped="$capped ${FINDING_OWNERS[i]}$FIELD_SEP${FINDING_KINDS[i]}"
     fi
@@ -1054,7 +1071,7 @@ findings_to_remember() {
       && unanswered_cap_allows "${RECORD_CLASSES[i]}" "${RECORD_OWNERS[i]}" "${RECORD_KINDS[i]}" "$capped"; then
       [ "${RECORD_CLASSES[i]}" != unanswered ] \
         || capped="$capped ${RECORD_OWNERS[i]}$FIELD_SEP${RECORD_KINDS[i]}"
-      out="$out${out:+$RECORD_TAB}${RECORD_OWNERS[i]}$FIELD_SEP${RECORD_KINDS[i]}$FIELD_SEP${RECORD_CLASSES[i]}$FIELD_SEP${RECORD_STREAKS[i]}$FIELD_SEP$text"
+      out="$out${out:+$RECORD_TAB}${RECORD_OWNERS[i]}$FIELD_SEP${RECORD_KINDS[i]}$FIELD_SEP${RECORD_CLASSES[i]}$FIELD_SEP${RECORD_STREAKS[i]}$FIELD_SEP${RECORD_SHOWN[i]}$FIELD_SEP$text"
     fi
     i=$((i + 1))
   done
@@ -1078,7 +1095,7 @@ record_write() {
 
 action_check() {
   local name command_name args_joined announce announce_args repo remote branch
-  local line now
+  local line now printed
 
   [ -f "$CONFIG" ] || return 0
 
@@ -1131,10 +1148,12 @@ action_check() {
   #
   # Report before recording, so a record that cannot be written costs a repeated
   # report rather than a lost one.
+  printed=0
   if [ -n "$line" ] && findings_are_news; then
     printf '%s\n' "$line"
+    printed=1
   fi
-  record_write "$(findings_to_remember)" || true
+  record_write "$(findings_to_remember "$printed")" || true
   return 0
 }
 

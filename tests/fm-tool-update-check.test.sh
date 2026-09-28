@@ -1072,6 +1072,30 @@ SH
   pass "repeated unanswered sweeps keep one failure per check and still remember the update"
 }
 
+test_a_failure_held_back_as_unanswered_is_reported_once_the_check_answers() {
+  local home first second out path
+  # A finding the streak gate held back was never shown, so it must not pass for
+  # something the operator has already been told. Here the same text is no answer on
+  # one sweep and a conclusion on the next, once every copy answers: that is the
+  # sweep that has to report it.
+  home=$(make_home held-back)
+  first="$TMP_ROOT/held-back/first/bin"
+  second="$TMP_ROOT/held-back/second/bin"
+  make_copy "$first" "$TOOL" 'no version here'
+  make_killed_copy "$second" "$TOOL"
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$first:$second")
+
+  run_check "$home" "$path" "$out"
+  [ ! -s "$out" ] || fail "a sweep that heard from no copy at all spoke on its own: $(cat "$out")"
+
+  make_copy "$second" "$TOOL" 'herdr 0.8.2'
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "herdr check failed: $first/$TOOL did not report a version" "the failure the sweep had held back was never reported once the check answered"
+  pass "a failure held back as unanswered is reported once its check answers"
+}
+
 test_a_sweep_with_no_answer_keeps_a_failure_the_probe_answered() {
   local home first mute out path
   # A copy that answers without a version is a conclusion the probe reached, and
@@ -1417,7 +1441,7 @@ test_probes_are_skipped_between_intervals() {
   FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$now" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "first cadence run exit"
-  assert_grep 'fm-tool-updates-v4' "$home/state/.tool-updates" "the first run did not record its sweep"
+  assert_grep 'fm-tool-updates-v5' "$home/state/.tool-updates" "the first run did not record its sweep"
 
   # A finding appears, but the interval has not elapsed, so no probe runs.
   make_copy "$dir" "$TOOL" 'no version here'
@@ -1713,6 +1737,7 @@ test_a_failure_the_probe_answered_does_not_swallow_a_returning_finding
 test_a_copy_that_never_answered_keeps_what_it_reported
 test_a_copy_killed_before_it_answered_keeps_what_it_reported
 test_a_sweep_with_no_answer_keeps_a_failure_the_probe_answered
+test_a_failure_held_back_as_unanswered_is_reported_once_the_check_answers
 test_a_cut_short_command_check_reports_no_update
 test_a_later_copy_cut_short_keeps_what_the_command_check_reported
 test_repeated_unanswered_sweeps_keep_one_failure_per_check
