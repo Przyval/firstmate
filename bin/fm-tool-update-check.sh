@@ -66,15 +66,15 @@
 # lands past the one-line cut is still news. Each recorded finding carries the
 # tool and the kind of check it came from, and a reported finding is forgotten
 # only once that same kind of check for that same tool reaches a conclusion
-# again. What is no conclusion at all is exactly no answer: a probe that ran out
-# its bound, a remote that could not be read, a budget that ran out, a tool the
-# sweep never reached. Those keep the memory, so an unanswered remote does not
-# erase an update already reported, and a git remote that cannot be read does not
-# erase what the command probe of the same tool answered. A failure the probe did
-# answer, such as a command that is no longer on PATH, is a conclusion and settles
-# that kind like any clean sweep does. A condition that clears and later returns
-# is news again. A sweep killed part way through leaves no record and is retried,
-# instead of suppressing its finding.
+# again. What is no conclusion at all is exactly no answer: a probe cut short by
+# its bound or by a signal, a remote that could not be read, a budget that ran
+# out, a tool the sweep never reached. Those keep the memory, so an unanswered
+# remote does not erase an update already reported, and a git remote that cannot
+# be read does not erase what the command probe of the same tool answered. A
+# failure the probe did answer, such as a command that is no longer on PATH, is a
+# conclusion and settles that kind like any clean sweep does. A condition that
+# clears and later returns is news again. A sweep killed part way through leaves
+# no record and is retried, instead of suppressing its finding.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -270,7 +270,7 @@ emit_failed() {
   emit "$1 check failed: $2"
 }
 
-# A check failure that is no answer at all: a probe that hit its bound, a remote
+# A check failure that is no answer at all: a probe cut short, a remote
 # that could not be read, a budget that ran out. Nothing was established, so what
 # was reported for this kind of check earlier is neither confirmed nor cleared.
 emit_unanswered() {
@@ -574,12 +574,12 @@ command_findings() {
       resolved_path=$hit
       resolved_version=$version
       resolved_out=$out
-      [ "$status" -ne 124 ] || resolved_answered=0
+      ! fm_timed_out "$status" || resolved_answered=0
     fi
     if [ -z "$version" ]; then
       if [ -z "$unreadable" ]; then
         unreadable=$hit
-        [ "$status" -ne 124 ] || unreadable_answered=0
+        ! fm_timed_out "$status" || unreadable_answered=0
       fi
       continue
     fi
@@ -607,7 +607,7 @@ EOF
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
         announce_out=$(probe_output "$resolved_path" $announce_args)
         status=$?
-        if [ "$status" -eq 124 ]; then
+        if fm_timed_out "$status"; then
           # A source that was asked and never answered is not a source that had
           # nothing to say. The one that answers with nothing stays silent below.
           emit_unanswered "$name" "$resolved_path did not answer when asked for its update announcement"
@@ -638,8 +638,8 @@ EOF
   if [ -z "$resolved_version" ]; then
     # No copy was probed at all when the path is empty, and the budget report
     # already covers that, so do not blame a copy that was never asked. A copy
-    # that ran out its bound answered nothing, while one that answered without a
-    # version did answer, and only the first leaves this check without a
+    # whose probe was cut short answered nothing, while one that answered without
+    # a version did answer, and only the first leaves this check without a
     # conclusion.
     if [ -n "$resolved_path" ]; then
       if [ "$resolved_answered" = 1 ]; then
@@ -688,16 +688,14 @@ git_probe() {
 # reports an unanswered read the same way instead of taking it for the answer no.
 git_probe_answered() {
   local status=$1 name=$2 subject=$3 question=$4
-  case "$status" in
-    "$GIT_PROBE_NOT_ISSUED")
-      emit_unanswered "$name" "the time budget ran out before $subject was asked $question"
-      return 1
-      ;;
-    124)
-      emit_unanswered "$name" "$subject did not answer $question"
-      return 1
-      ;;
-  esac
+  if [ "$status" = "$GIT_PROBE_NOT_ISSUED" ]; then
+    emit_unanswered "$name" "the time budget ran out before $subject was asked $question"
+    return 1
+  fi
+  if fm_timed_out "$status"; then
+    emit_unanswered "$name" "$subject did not answer $question"
+    return 1
+  fi
   return 0
 }
 
@@ -736,7 +734,15 @@ git_findings() {
     # has no local record of the remote's default branch. Ask the remote itself
     # rather than reporting a check failure the operator cannot act on.
     symref=$(git_probe "$repo" ls-remote --symref "$remote" HEAD 2>/dev/null)
-    git_probe_answered "$?" "$name" "$remote" "which branch it uses by default" || return 0
+    status=$?
+    git_probe_answered "$status" "$name" "$remote" "which branch it uses by default" || return 0
+    if [ "$status" -ne 0 ]; then
+      # This probe is the same network read as the one below, so a remote that
+      # cannot be reached is reported as that, never as a default branch this
+      # check never got to ask about.
+      emit_unanswered "$name" "$remote could not be reached or read from $repo"
+      return 0
+    fi
     branch=$(printf '%s\n' "$symref" \
       | awk '$1 == "ref:" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
   fi

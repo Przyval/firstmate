@@ -67,6 +67,20 @@ SH
   chmod 0755 "$dir/$command_name"
 }
 
+# make_killed_copy <dir> <command>: a copy that is killed before it can answer, so
+# a case can exercise a probe cut short by a signal rather than by its own bound.
+# The bounded runner reports that as 128 plus the signal, not as its timeout
+# status, and neither one established anything about the copy.
+make_killed_copy() {
+  local dir=$1 command_name=$2
+  mkdir -p "$dir"
+  cat > "$dir/$command_name" <<'SH'
+#!/usr/bin/env bash
+kill -KILL $$
+SH
+  chmod 0755 "$dir/$command_name"
+}
+
 # make_counting_copy <dir> <command> <version-output> <log>: the same copy, which
 # also appends one line to <log> every time it runs, so a case can assert how
 # many times the check actually probed it.
@@ -793,6 +807,55 @@ SH
   pass "a flaky remote does not repeat an update that was already reported"
 }
 
+test_an_unreachable_remote_keeps_the_update_when_the_branch_comes_from_the_remote() {
+  local home work dir out path report
+  # A clone with no local record of the remote's default branch asks the remote
+  # for it, which is a network read like any other: a remote that refuses it
+  # establishes nothing about the update already reported, and must not be
+  # reported as a default branch this check never got to ask about either.
+  home=$(make_home symref-offline)
+  work=$(git_fixture symref-offline-repo)
+  git -C "$work" remote set-head origin --delete >/dev/null 2>&1
+  git -C "$work" reset -q --hard HEAD~2
+  ! git -C "$work" symbolic-ref --quiet refs/remotes/origin/HEAD >/dev/null 2>&1 \
+    || fail "the fixture still records the remote's default branch locally"
+
+  # A git whose network reads are refused outright, the way an unreachable remote
+  # refuses them, whenever the flag file exists.
+  dir="$TMP_ROOT/symref-offline/bin"
+  mkdir -p "$dir"
+  cat > "$dir/git" <<SH
+#!/usr/bin/env bash
+if [ -e '$TMP_ROOT/symref-offline/offline' ]; then
+  for arg in "\$@"; do
+    if [ "\$arg" = ls-remote ]; then
+      printf 'fatal: could not read from remote repository\n' >&2
+      exit 128
+    fi
+  done
+fi
+exec $(command -v git) "\$@"
+SH
+  chmod 0755 "$dir/git"
+  path=$(fixture_path "$dir")
+
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "firstmate update available: local main is 2 commits behind origin/main" "the first sweep did not report the pending update"
+
+  touch "$TMP_ROOT/symref-offline/offline"
+  run_check "$home" "$path" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "firstmate check failed: origin could not be reached or read from $work" "a remote that refused the read was not reported as unreachable"
+  assert_not_contains "$report" "cannot resolve the default branch" "a remote that was never read was reported as having no default branch"
+
+  rm -f "$TMP_ROOT/symref-offline/offline"
+  run_check "$home" "$path" "$out"
+  [ ! -s "$out" ] || fail "an unreachable remote erased the update already reported, so it was reported again: $(cat "$out")"
+  pass "an unreachable remote keeps the update when the branch is asked of the remote"
+}
+
 test_a_failure_the_probe_answered_does_not_swallow_a_returning_finding() {
   local home stale fresh out path
   # A command that is no longer on PATH is an answer, not a missing one: the
@@ -849,6 +912,34 @@ test_a_copy_that_never_answered_keeps_what_it_reported() {
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   [ ! -s "$out" ] || fail "a copy that never answered erased the skew already reported, so it was reported again: $(cat "$out")"
   pass "a copy that never answered keeps what its tool's command check reported"
+}
+
+test_a_copy_killed_before_it_answered_keeps_what_it_reported() {
+  local home stale fresh out path
+  # A probe can be cut short by a signal instead of by its own bound, which the
+  # bounded runner reports as 128 plus the signal rather than as its timeout
+  # status. Either way the copy answered nothing, so it must not settle the
+  # command check and clear the skew already reported.
+  home=$(make_home killed-copy)
+  stale="$TMP_ROOT/killed-copy/mise/installs/herdr/latest/bin"
+  fresh="$TMP_ROOT/killed-copy/local/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$stale:$fresh")
+
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "herdr update not in effect" "the first sweep did not report the PATH skew"
+
+  make_killed_copy "$stale" "$TOOL"
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "herdr check failed: $stale/$TOOL did not report a version" "a copy killed before it answered was not reported"
+
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  run_check "$home" "$path" "$out"
+  [ ! -s "$out" ] || fail "a copy killed before it answered erased the skew already reported, so it was reported again: $(cat "$out")"
+  pass "a copy killed before it answered keeps what its tool's command check reported"
 }
 
 test_the_record_is_written_under_the_system_shell() {
@@ -1322,8 +1413,10 @@ test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
 test_a_flaky_remote_does_not_repeat_a_reported_update
+test_an_unreachable_remote_keeps_the_update_when_the_branch_comes_from_the_remote
 test_a_failure_the_probe_answered_does_not_swallow_a_returning_finding
 test_a_copy_that_never_answered_keeps_what_it_reported
+test_a_copy_killed_before_it_answered_keeps_what_it_reported
 test_the_record_is_written_under_the_system_shell
 test_one_failing_check_kind_keeps_what_the_other_kind_reported
 test_a_truncated_sweep_keeps_what_the_tools_it_missed_reported
