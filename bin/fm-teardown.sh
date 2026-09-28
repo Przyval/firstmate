@@ -91,11 +91,13 @@
 # held scout) leaves a slot the pool hands to the next spawn. Two crewmate
 # records on one slot are therefore resolved by handout order rather than
 # refused forever: the slot's claim naming this task, or, with no claim, a later
-# spawn_gen stamp than the other record's, makes the other record the stale one
-# and this cleanup proceeds; an earlier stamp makes THIS record the stale one and
-# it is treated exactly like a claim naming another task (below). Tearing down
-# each stale record then clears the pair. A home= collision, or records whose
-# order cannot be proved, still refuse even with --force.
+# spawn_gen stamp than the other record's together with that record's endpoint
+# reading dead or missing, makes the other record the stale one and this
+# cleanup proceeds; an earlier stamp makes THIS record the stale one and it is
+# treated exactly like a claim naming another task (below), which touches no
+# slot. Tearing down each stale record then clears the pair. A home= collision,
+# records whose order cannot be proved, or an earlier record whose endpoint may
+# be live still refuse even with --force.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2350,9 +2352,12 @@ collect_local_firstmate_states() {
 }
 
 # Spawn epoch of a task record, from spawn_gen=s<epoch>.<pid>.<nonce>; fails
-# when the record has no single well-formed stamp.
+# when the record has no single well-formed stamp, so a record carrying two
+# stamps proves no order at all.
 record_spawn_epoch() {  # <meta>
-  local gen epoch
+  local gen epoch count
+  count=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { n++ } END { print n + 0 }' "$1" 2>/dev/null) || return 1
+  [ "$count" = 1 ] || return 1
   gen=$(fm_meta_get "$1" spawn_gen)
   epoch=${gen#s}
   epoch=${epoch%%.*}
@@ -2368,7 +2373,7 @@ record_spawn_epoch() {  # <meta>
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
-  local claim own_epoch other_epoch other_kind
+  local claim own_epoch other_epoch other_kind other_endpoint
   slot=$(canonical_existing_dir "$worktree") || return 0
   # The slot's own claim, when present, names the task that took it last, which
   # settles which of two records sharing the slot is stale (see the header).
@@ -2395,13 +2400,25 @@ require_exclusive_worktree_slot_record() {
         if [ "$field" = worktree ] && [ "$other_kind" != secondmate ]; then
           # The pool hands a slot on only once no process runs under it, so of
           # two task records on one slot the later spawn is the holder and the
-          # earlier one is stale. Evidence: this task's own claim, else both
-          # records' spawn stamps.
+          # earlier one is stale. This task's own claim proves that outright.
+          # Without a claim, spawn order alone never authorizes the destructive
+          # slot steps: the earlier record's endpoint must also read dead or
+          # missing, the same recovery-grade gate --legacy-record uses, and a
+          # live or unknown endpoint keeps the refusal below.
           other_epoch=$(record_spawn_epoch "$other") || other_epoch=
-          if [ "$claim" = mine ] || { [ "$claim" = absent ] && [ -n "$own_epoch" ] &&
-               [ -n "$other_epoch" ] && [ "$other_epoch" -lt "$own_epoch" ]; }; then
-            echo "warning: task $other_id's record also names $slot, but that slot was handed to $record_id after $other_id was spawned; $other_id's record is stale there and does not block this cleanup (tear $other_id down to clear it)." >&2
+          if [ "$claim" = mine ]; then
+            echo "warning: task $other_id's record also names $slot, but that slot's claim names $record_id; $other_id's record is stale there and does not block this cleanup (tear $other_id down to clear it)." >&2
             continue 2
+          fi
+          if [ "$claim" = absent ] && [ -n "$own_epoch" ] && [ -n "$other_epoch" ] &&
+             [ "$other_epoch" -lt "$own_epoch" ]; then
+            other_endpoint=$(fm_backend_agent_state "$(fm_backend_of_meta "$other")" "$(fm_backend_target_of_meta "$other")")
+            case "$other_endpoint" in
+              dead|missing)
+                echo "warning: task $other_id's record also names $slot, but $other_id was spawned before $record_id and its endpoint reads '$other_endpoint'; $other_id's record is stale there and does not block this cleanup (tear $other_id down to clear it)." >&2
+                continue 2
+                ;;
+            esac
           fi
           if [ "$claim" = absent ] && [ -n "$own_epoch" ] && [ -n "$other_epoch" ] &&
              [ "$other_epoch" -gt "$own_epoch" ]; then
@@ -2420,11 +2437,9 @@ require_exclusive_worktree_slot_record() {
   done
 }
 
-require_exclusive_task_worktree_slot() {
-  local slot rc=0
-  slot=$(teardown_live_slot_path) || return 0
-  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot" || rc=$?
-  case "$rc" in
+# Record one slot determination's result for every later slot step.
+teardown_note_slot_determination() {  # <rc>
+  case "$1" in
     0) return 0 ;;
     "$TEARDOWN_SLOT_REASSIGNED_RC")
       TEARDOWN_SLOT_REASSIGNED=1
@@ -2434,6 +2449,13 @@ require_exclusive_task_worktree_slot() {
       ;;
   esac
   return 1
+}
+
+require_exclusive_task_worktree_slot() {
+  local slot rc=0
+  slot=$(teardown_live_slot_path) || return 0
+  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot" || rc=$?
+  teardown_note_slot_determination "$rc"
 }
 
 # Positive slot ownership, read from the claim the task that took the slot wrote
@@ -2458,7 +2480,8 @@ require_exclusive_task_worktree_slot() {
 # An absent claim proceeds as the slot's owner: a slot taken before claims
 # existed, or already returned to the pool, carries none, and refusing those
 # would strand every task in flight across the change for no evidence at all.
-# Those keep exactly the record-scan protection they had before.
+# Those keep the record scan's protection, which resolves a shared slot by
+# handout order only when the earlier record's endpoint is proved gone.
 TEARDOWN_SLOT_REASSIGNED_RC=3
 require_owned_worktree_slot_record() {  # <task-id> <worktree>
   local record_id=$1 worktree=$2 marker
@@ -2486,16 +2509,7 @@ require_owned_task_worktree_slot() {
   local slot rc=0
   slot=$(teardown_live_slot_path) || return 0
   require_owned_worktree_slot_record "$ID" "$slot" || rc=$?
-  case "$rc" in
-    0) return 0 ;;
-    "$TEARDOWN_SLOT_REASSIGNED_RC")
-      TEARDOWN_SLOT_REASSIGNED=1
-      TEARDOWN_SLOT_REASSIGNED_TO=$FM_TREEHOUSE_SLOT_OWNER_ID
-      TEARDOWN_SLOT_REASSIGNED_HOME=$FM_TREEHOUSE_SLOT_OWNER_HOME
-      return 0
-      ;;
-  esac
-  return 1
+  teardown_note_slot_determination "$rc"
 }
 
 teardown_owns_worktree() {
@@ -3301,18 +3315,22 @@ cleanup_firstmate_home_children() {
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-      # The same ownership determination as the parent's own slot: a child
-      # slot reassigned to another task is not this child's to kill, reset,
-      # or return, so only its records are cleaned up. The preflight above
+      # The same ownership determination as the parent's own slot and the
+      # preflight above: the record scan's handout order, then the claim. A
+      # child slot reassigned to another task is not this child's to kill,
+      # reset, or return, so only its records are cleaned up. The preflight
       # already named the reassignment on stderr under the same lock.
       child_owner_rc=0
       if fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
-        require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
+        require_exclusive_worktree_slot_record "$child_meta" "$child_id" "$sub_state" "$child_wt" 2>/dev/null || child_owner_rc=$?
+        [ "$child_owner_rc" -ne 0 ] ||
+          require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
       fi
       if [ "$child_owner_rc" -eq "$TEARDOWN_SLOT_REASSIGNED_RC" ]; then
         :
       elif [ "$child_owner_rc" -ne 0 ]; then
-        require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
+        echo "REFUSED: child $child_id's pool slot $child_wt can no longer be proved to be its own; stopping forced cleanup." >&2
+        return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \

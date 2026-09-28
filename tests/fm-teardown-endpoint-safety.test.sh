@@ -1029,6 +1029,44 @@ test_shared_slot_records_resolve_by_handout_order() {
     || fail "the stale record's teardown returned the holder's slot"
   assert_contains "$(cat "$dir/stderr")" "$new" "the warning should name the holder"
 
+  # Without a claim, spawn order alone never authorizes the destructive slot
+  # steps: an earlier record whose endpoint is still present keeps the refusal.
+  dir=$(make_case slot-shared-unclaimed-live)
+  mark_case_as_treehouse_pool "$dir"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows) printf 'fm-old-scout\n'; exit 0 ;;
+  display-message) exit 0 ;;
+esac
+printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "unclaimed shared slot whose earlier record may be live"
+  assert_present "$dir/home/state/$old.meta" "the refused teardown removed the earlier record"
+  assert_contains "$(cat "$dir/stderr")" "is also task $old's recorded worktree" \
+    "the refusal should name the earlier record"
+
+  # A record carrying two spawn stamps proves no order, so it refuses too.
+  dir=$(make_case slot-shared-two-stamps)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "spawn_gen=s1790600000.1.1" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose other record has two spawn stamps"
+
   # The holder's claim settles it even when the stale record has no stamp.
   dir=$(make_case slot-shared-claimed)
   mark_case_as_treehouse_pool "$dir"
