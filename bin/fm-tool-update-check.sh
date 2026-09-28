@@ -978,7 +978,7 @@ unanswered_streak() {
   while [ "$i" -lt "${#RECORD_TEXTS[@]}" ]; do
     if [ "${RECORD_CLASSES[i]}" = unanswered ] && [ "${RECORD_OWNERS[i]}" = "$1" ] \
       && [ "${RECORD_KINDS[i]}" = "$2" ]; then
-      printf '%s' "$(( ${RECORD_STREAKS[i]} + 1 ))"
+      printf '%s' "$(( RECORD_STREAKS[i] + 1 ))"
       return 0
     fi
     i=$((i + 1))
