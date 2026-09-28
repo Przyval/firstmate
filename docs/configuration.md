@@ -1371,8 +1371,11 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
   What counts as no conclusion is no answer at all: a probe cut short by its bound or by a signal, a remote that could not be read, a budget that ran out, or a tool a truncated sweep never reached.
   So an unanswered remote does not make an already reported update news again, and an unreadable `git` remote does not clear what the `command` probe of the same tool answered.
 - A failure the probe did answer, such as a command that is no longer on PATH, a directory that is not a repository, or a branch the remote does not have, is a conclusion and settles that kind of check like any clean sweep does.
-- A changed or returning condition is reported again, a check failure included: once the remote answers, a later unanswered read is news again.
-- Of the failures one kind of check reported, only the newest is remembered, so a check that keeps getting no answer does not grow the record one sweep at a time.
+- A changed or returning condition is reported again, a failure the probe answered included.
+- A check with no answer is not reported for its own sake, because a remote that flaps between answering and not would otherwise wake you on every failing poll and say nothing you can act on.
+  It is reported once that kind of check for that tool has gone unanswered three sweeps in a row, once per such streak, and an answer ends the streak.
+- A check with no answer never claims to know an update either: a `command` check whose copies did not all answer reports no update that sweep, since the version comparison it would rest on is incomplete.
+- Of the unanswered entries one kind of check left behind, only the newest is remembered, so a check that keeps getting no answer does not grow the record one sweep at a time.
 - Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 - This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
 

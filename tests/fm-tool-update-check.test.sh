@@ -122,6 +122,26 @@ run_check() {
   expect_code 0 "$status" "check exit"
 }
 
+# A check that gets no answer at all is held back until the same kind of check for
+# the same tool has gone unanswered three sweeps in a row, so a case about what
+# such a sweep reports has to run that streak out. What the last sweep printed is
+# what lands in <out>; the earlier sweeps of the streak are expected to be silent.
+UNANSWERED_STREAK=3
+run_check_until_unanswered() {
+  local home=$1 path=$2 out=$3
+  shift 3
+  local i=0
+  while [ "$i" -lt "$UNANSWERED_STREAK" ]; do
+    i=$((i + 1))
+    run_check "$home" "$path" "$out" "$@"
+    if [ "$i" -lt "$UNANSWERED_STREAK" ] && [ -s "$out" ]; then
+      # An earlier sweep of the streak spoke, which means what it reported was
+      # not held back as an unanswered condition at all.
+      return 0
+    fi
+  done
+}
+
 # --- the regression this script exists for ----------------------------------
 
 test_path_skew_is_reported_from_every_copy() {
@@ -408,7 +428,7 @@ SH
   # more than a full second of headroom for the millisecond-scale work before
   # the copy loop, while the version probe below (bounded, then sleeping 30)
   # still exhausts the budget before the announcement check.
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
+  run_check_until_unanswered "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
   pass "an announcement source the budget could not reach is reported, not read as current"
@@ -433,7 +453,7 @@ SH
   chmod 0755 "$dir/no-mistakes-fixture"
   write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  run_check_until_unanswered "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check failed: $dir/no-mistakes-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
   pass "an announcement probe that does not answer is reported, not read as current"
@@ -563,7 +583,7 @@ test_unreadable_remote_is_not_reported_as_a_missing_branch() {
   rm -rf "$TMP_ROOT/git-unreadable-repo.git"
   write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
   out="$home/out.txt"
-  run_check "$home" "$PATH" "$out"
+  run_check_until_unanswered "$home" "$PATH" "$out"
   report=$(cat "$out")
   assert_contains "$report" "firstmate check failed" "a remote that could not be read was not reported"
   assert_contains "$report" "origin could not be reached or read" "the report does not name the condition the probe actually found"
@@ -639,7 +659,7 @@ SH
   # only probe that can hit it is the object query the fixture stalls. Asserting
   # that specific report keeps an unrelated timeout from passing this case for the
   # wrong reason.
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=3
+  run_check_until_unanswered "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=3
   report=$(cat "$out")
   assert_not_contains "$report" "update available" "a probe that never answered was reported as an available update"
   assert_contains "$report" "firstmate check failed: $work did not answer whether it already has" "the stalled object query was not the reported failure"
@@ -672,7 +692,7 @@ SH
 
   write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
   out="$home/out.txt"
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  run_check_until_unanswered "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
   assert_contains "$report" "firstmate check failed: $work did not answer whether it is a git repository" "a repository probe that never answered was not reported as such"
   assert_not_contains "$report" "is not a git repository" "a repository probe that never answered was reported as not a repository"
@@ -780,21 +800,20 @@ SH
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
   assert_contains "$(cat "$out")" "firstmate update available" "the first sweep did not report the pending update"
 
+  # A link that answers every other poll never goes unanswered long enough to be
+  # worth a word, and the update it already reported is not news again either, so
+  # the whole flap is silent.
   touch "$TMP_ROOT/flaky/offline"
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
-  assert_contains "$(cat "$out")" "did not answer" "the first unanswered read was not reported"
+  [ ! -s "$out" ] || fail "one unanswered read woke the operator on its own: $(cat "$out")"
 
   rm -f "$TMP_ROOT/flaky/offline"
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
   [ ! -s "$out" ] || fail "an update already reported was reported again after one unanswered read: $(cat "$out")"
 
-  # The remote answered in between, which cleared the unanswered read, so the
-  # read that fails again is a returning condition and is reported as one. What
-  # must not come back is the update the answering sweep already accounted for.
   touch "$TMP_ROOT/flaky/offline"
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
-  assert_contains "$(cat "$out")" "did not answer" "a returning unanswered read was suppressed as a repeat"
-  assert_not_contains "$(cat "$out")" "update available" "an update already reported came back with the next unanswered read"
+  [ ! -s "$out" ] || fail "the second flap of the same link woke the operator: $(cat "$out")"
 
   rm -f "$TMP_ROOT/flaky/offline"
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
@@ -804,7 +823,52 @@ SH
   git -C "$work" reset -q --hard origin/main~1
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
   assert_contains "$(cat "$out")" "1 commit behind" "a changed update was suppressed as a repeat"
-  pass "a flaky remote does not repeat an update that was already reported"
+  pass "a flaky remote reports neither the same update nor the flapping itself"
+}
+
+test_a_remote_that_stays_unreachable_is_reported_once() {
+  local home work dir out path i
+  # Holding an unanswered read back must not bury a link that is genuinely down:
+  # once the same check has gone unanswered three sweeps in a row it says so, and
+  # says it once, however long the streak runs on.
+  home=$(make_home persistent)
+  work=$(git_fixture persistent-repo)
+  git -C "$work" reset -q --hard HEAD~2
+  dir="$TMP_ROOT/persistent/bin"
+  mkdir -p "$dir"
+  cat > "$dir/git" <<SH
+#!/usr/bin/env bash
+if [ -e '$TMP_ROOT/persistent/offline' ]; then
+  for arg in "\$@"; do
+    if [ "\$arg" = ls-remote ]; then
+      printf 'fatal: could not read from remote repository\n' >&2
+      exit 128
+    fi
+  done
+fi
+exec $(command -v git) "\$@"
+SH
+  chmod 0755 "$dir/git"
+  path=$(fixture_path "$dir")
+
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "firstmate update available" "the first sweep did not report the pending update"
+
+  touch "$TMP_ROOT/persistent/offline"
+  for i in 1 2; do
+    run_check "$home" "$path" "$out"
+    [ ! -s "$out" ] || fail "unanswered sweep $i of the streak spoke before the streak was out: $(cat "$out")"
+  done
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "firstmate check failed: origin could not be reached or read from $work" "a link that stayed down for three sweeps was never reported"
+
+  for i in 4 5; do
+    run_check "$home" "$path" "$out"
+    [ ! -s "$out" ] || fail "sweep $i of the same streak reported the down link again: $(cat "$out")"
+  done
+  pass "a remote that stays unreachable is reported once, after three unanswered sweeps"
 }
 
 test_an_unreachable_remote_keeps_the_update_when_the_branch_comes_from_the_remote() {
@@ -845,7 +909,7 @@ SH
   assert_contains "$(cat "$out")" "firstmate update available: local main is 2 commits behind origin/main" "the first sweep did not report the pending update"
 
   touch "$TMP_ROOT/symref-offline/offline"
-  run_check "$home" "$path" "$out"
+  run_check_until_unanswered "$home" "$path" "$out"
   report=$(cat "$out")
   assert_contains "$report" "firstmate check failed: origin could not be reached or read from $work" "a remote that refused the read was not reported as unreachable"
   assert_not_contains "$report" "cannot resolve the default branch" "a remote that was never read was reported as having no default branch"
@@ -905,7 +969,7 @@ test_a_copy_that_never_answered_keeps_what_it_reported() {
   assert_contains "$(cat "$out")" "herdr update not in effect" "the first sweep did not report the PATH skew"
 
   make_slow_copy "$stale" "$TOOL" 30
-  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  run_check_until_unanswered "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   assert_contains "$(cat "$out")" "herdr check failed: $stale/$TOOL did not report a version" "a copy that never answered was not reported"
 
   make_copy "$stale" "$TOOL" 'herdr 0.8.0'
@@ -986,7 +1050,7 @@ SH
   assert_contains "$(cat "$out")" "firstmate update available: local main is 2 commits behind origin/main" "the first sweep did not report the pending update"
 
   touch "$TMP_ROOT/sha-bound/offline"
-  for i in 1 2 3; do
+  for i in 1 2 3 4; do
     # Each round moves the remote branch on, so the commit the stalled probe was
     # asked about differs every time and no two failure texts are alike.
     printf 'more\n' > "$push/f-$i"
@@ -994,8 +1058,10 @@ SH
     git -C "$push" commit -qm "more $i"
     git -C "$push" push -q origin main
     run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
-    assert_contains "$(cat "$out")" "did not answer whether it already has" "the stalled commit lookup was not reported"
   done
+  # The streak spoke once, on its third sweep, and the fourth round's changed
+  # commit did not make it speak again.
+  [ ! -s "$out" ] || fail "a moving remote reported the same stalled lookup again: $(cat "$out")"
 
   entries=$(grep -o 'did not answer whether it already has' "$home/state/.tool-updates" | wc -l | tr -d ' ')
   [ "$entries" = 1 ] \
@@ -1004,6 +1070,74 @@ SH
   [ "$entries" = 1 ] \
     || fail "the unanswered sweeps lost the update already reported, found $entries entries for it"
   pass "repeated unanswered sweeps keep one failure per check and still remember the update"
+}
+
+test_a_sweep_with_no_answer_keeps_a_failure_the_probe_answered() {
+  local home first mute out path
+  # A copy that answers without a version is a conclusion the probe reached, and
+  # a later sweep that gets no answer at all says nothing about it. Only the one
+  # unanswered entry a check leaves behind is capped, so the answered failure must
+  # still be remembered afterwards rather than evicted by it and reported again.
+  home=$(make_home sibling-failure)
+  first="$TMP_ROOT/sibling-failure/first/bin"
+  mute="$TMP_ROOT/sibling-failure/mute/bin"
+  make_copy "$first" "$TOOL" 'herdr 0.8.0'
+  make_copy "$mute" "$TOOL" 'no version here'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$first:$mute")
+
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_contains "$(cat "$out")" "herdr check failed: $mute/$TOOL did not report a version" "the copy that answered without a version was not reported"
+
+  # The first copy now stalls, so this sweep gets no answer from it and never
+  # reaches the second copy's failure to report it again.
+  make_slow_copy "$first" "$TOOL" 30
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_not_contains "$(cat "$out")" "$mute/$TOOL" "a sweep that never asked the second copy reported its failure anyway"
+
+  make_copy "$first" "$TOOL" 'herdr 0.8.0'
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  [ ! -s "$out" ] || fail "a sweep with no answer evicted the failure the probe had answered, so it was reported again: $(cat "$out")"
+  pass "a sweep with no answer keeps the failure a probe of the same check answered"
+}
+
+test_a_cut_short_command_check_reports_no_update() {
+  local home first mute last out path entries
+  # A command check that did not hear from every copy cannot say which copy is
+  # newest, so it reports no update from that comparison at all. That is also what
+  # keeps its record bounded: were it to report one anyway, every sweep whose copies
+  # kept changing would leave another remembered update behind.
+  home=$(make_home cut-short-quiet)
+  first="$TMP_ROOT/cut-short-quiet/mise/installs/herdr/latest/bin"
+  mute="$TMP_ROOT/cut-short-quiet/mute/bin"
+  last="$TMP_ROOT/cut-short-quiet/local/bin"
+  make_copy "$first" "$TOOL" 'herdr 0.8.0'
+  make_copy "$mute" "$TOOL" 'herdr 0.8.1'
+  make_copy "$last" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$first:$mute:$last")
+
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_contains "$(cat "$out")" "herdr update not in effect" "the first sweep did not report the PATH skew"
+
+  # One copy stalls from here on, while the newest copy keeps being upgraded, so
+  # every sweep would have a different skew to report if it reported one.
+  make_slow_copy "$mute" "$TOOL" 30
+  make_copy "$last" "$TOOL" 'herdr 0.8.3'
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_not_contains "$(cat "$out")" "update not in effect" "a check that never heard from every copy claimed to know the skew"
+
+  make_copy "$last" "$TOOL" 'herdr 0.8.4'
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_not_contains "$(cat "$out")" "update not in effect" "a check that never heard from every copy claimed to know the skew"
+
+  # state/.tool-updates is this check's own record of what it already reported.
+  entries=$(grep -o 'update not in effect' "$home/state/.tool-updates" | wc -l | tr -d ' ')
+  [ "$entries" = 1 ] \
+    || fail "two sweeps that never heard from every copy left $entries remembered updates behind instead of the one already reported"
+  pass "a command check cut short reports no update, and remembers no new one"
 }
 
 test_a_copy_killed_before_it_answered_keeps_what_it_reported() {
@@ -1025,7 +1159,7 @@ test_a_copy_killed_before_it_answered_keeps_what_it_reported() {
   assert_contains "$(cat "$out")" "herdr update not in effect" "the first sweep did not report the PATH skew"
 
   make_killed_copy "$stale" "$TOOL"
-  run_check "$home" "$path" "$out"
+  run_check_until_unanswered "$home" "$path" "$out"
   assert_contains "$(cat "$out")" "herdr check failed: $stale/$TOOL did not report a version" "a copy killed before it answered was not reported"
 
   make_copy "$stale" "$TOOL" 'herdr 0.8.0'
@@ -1112,7 +1246,7 @@ SH
   assert_contains "$report" "herdr update available: local main is 2 commits behind origin/main" "the first sweep did not report the pending git update"
 
   touch "$TMP_ROOT/mixed/offline"
-  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
+  run_check_until_unanswered "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
   report=$(cat "$out")
   assert_contains "$report" "herdr check failed: origin did not answer" "the unanswered read was not reported"
   assert_not_contains "$report" "update available" "an unanswered read reported an update it never established"
@@ -1215,7 +1349,7 @@ test_probes_are_skipped_between_intervals() {
   FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$now" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "first cadence run exit"
-  assert_grep 'fm-tool-updates-v3' "$home/state/.tool-updates" "the first run did not record its sweep"
+  assert_grep 'fm-tool-updates-v4' "$home/state/.tool-updates" "the first run did not record its sweep"
 
   # A finding appears, but the interval has not elapsed, so no probe runs.
   make_copy "$dir" "$TOOL" 'no version here'
@@ -1505,10 +1639,13 @@ test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
 test_a_flaky_remote_does_not_repeat_a_reported_update
+test_a_remote_that_stays_unreachable_is_reported_once
 test_an_unreachable_remote_keeps_the_update_when_the_branch_comes_from_the_remote
 test_a_failure_the_probe_answered_does_not_swallow_a_returning_finding
 test_a_copy_that_never_answered_keeps_what_it_reported
 test_a_copy_killed_before_it_answered_keeps_what_it_reported
+test_a_sweep_with_no_answer_keeps_a_failure_the_probe_answered
+test_a_cut_short_command_check_reports_no_update
 test_a_later_copy_cut_short_keeps_what_the_command_check_reported
 test_repeated_unanswered_sweeps_keep_one_failure_per_check
 test_the_record_is_written_under_the_system_shell
