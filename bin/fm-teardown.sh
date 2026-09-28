@@ -101,10 +101,17 @@
 # does the same, so this cleanup proceeds. An earlier stamp than the other
 # record's makes THIS record the stale one only when that record's endpoint
 # reads alive while this record's reads dead or missing; it is then treated
-# exactly like a claim naming another task (below), which touches no slot.
-# Tearing down each stale record then clears the pair. A home= collision,
-# records whose order cannot be proved, and every other endpoint combination -
-# both alive, both gone, or any unknown reading - still refuse even with --force.
+# exactly like a claim naming another task (below), which touches no slot. A
+# record taken before spawn_gen existed carries no stamp at all, so a pair in
+# which exactly one record is unstamped resolves on that record's endpoint
+# alone: an unstamped record whose endpoint reads dead or missing is the stale
+# side, so the stamped record's teardown proceeds and the unstamped record's
+# teardown touches no slot. Tearing down each stale record then clears the pair.
+# A home= collision, records whose order cannot be proved - equal stamps, two
+# stamps on one record, or neither record stamped - and every endpoint reading
+# that does not corroborate the order (a stale side reading alive or unknown, or
+# an earlier-stamped record whose own endpoint is not dead or missing) still
+# refuse even with --force.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2361,9 +2368,19 @@ collect_local_firstmate_states() {
 # Spawn epoch of a task record, from spawn_gen=s<epoch>.<pid>.<nonce>; fails
 # when the record has no single well-formed stamp, so a record carrying two
 # stamps proves no order at all.
+record_spawn_stamp_count() {  # <meta>
+  LC_ALL=C awk -F= '$1 == "spawn_gen" { n++ } END { print n + 0 }' "$1" 2>/dev/null
+}
+
+# True only for a record carrying no spawn_gen field at all - the legacy class
+# that predates the stamp, as distinct from stamps that prove no order.
+record_has_no_spawn_stamp() {  # <meta>
+  [ "$(record_spawn_stamp_count "$1")" = 0 ]
+}
+
 record_spawn_epoch() {  # <meta>
   local gen epoch count
-  count=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { n++ } END { print n + 0 }' "$1" 2>/dev/null) || return 1
+  count=$(record_spawn_stamp_count "$1") || return 1
   [ "$count" = 1 ] || return 1
   gen=$(fm_meta_get "$1" spawn_gen)
   epoch=${gen#s}
@@ -2413,7 +2430,10 @@ require_exclusive_worktree_slot_record() {
           # reads dead or missing - the same recovery-grade gate
           # --legacy-record uses - and the earlier-stamped record skips the slot
           # only once the later one's endpoint reads alive while its own reads
-          # dead or missing. Every other combination keeps the refusal below.
+          # dead or missing. A record predating spawn_gen carries no stamp, so a
+          # pair with exactly one unstamped record resolves on that record's own
+          # endpoint reading dead or missing, in the same two directions. Every
+          # other combination keeps the refusal below.
           other_epoch=$(record_spawn_epoch "$other") || other_epoch=
           if [ "$claim" = mine ]; then
             echo "warning: task $other_id's record also names $slot, but that slot's claim names $record_id; $other_id's record is stale there and does not block this cleanup (tear $other_id down to clear it)." >&2
@@ -2426,6 +2446,28 @@ require_exclusive_worktree_slot_record() {
               dead|missing)
                 echo "warning: task $other_id's record also names $slot, but $other_id was spawned before $record_id and its endpoint reads '$other_endpoint'; $other_id's record is stale there and does not block this cleanup (tear $other_id down to clear it)." >&2
                 continue 2
+                ;;
+            esac
+          fi
+          if [ "$claim" = absent ] && [ -n "$own_epoch" ] && [ -z "$other_epoch" ] &&
+             record_has_no_spawn_stamp "$other"; then
+            other_endpoint=$(fm_backend_agent_state "$(fm_backend_of_meta "$other")" "$(fm_backend_target_of_meta "$other")")
+            case "$other_endpoint" in
+              dead|missing)
+                echo "warning: task $other_id's record also names $slot, but it predates spawn stamps while $record_id's record carries one and $other_id's endpoint reads '$other_endpoint'; $other_id's record is stale there and does not block this cleanup (tear $other_id down to clear it)." >&2
+                continue 2
+                ;;
+            esac
+          fi
+          if [ "$claim" = absent ] && [ -z "$own_epoch" ] && [ -n "$other_epoch" ] &&
+             record_has_no_spawn_stamp "$record_meta"; then
+            own_endpoint=$(fm_backend_agent_state "$(fm_backend_of_meta "$record_meta")" "$(fm_backend_target_of_meta "$record_meta")")
+            case "$own_endpoint" in
+              dead|missing)
+                FM_TREEHOUSE_SLOT_OWNER_ID=$other_id
+                FM_TREEHOUSE_SLOT_OWNER_HOME=${state_dir%/state}
+                echo "warning: task $record_id's recorded worktree $slot is also task $other_id's, whose record carries a spawn stamp while $record_id's predates them and $record_id's endpoint reads '$own_endpoint'; that slot is $other_id's now, so its processes, copy, and claim are left untouched and only $record_id's own cleanup runs." >&2
+                return "$TEARDOWN_SLOT_REASSIGNED_RC"
                 ;;
             esac
           fi
