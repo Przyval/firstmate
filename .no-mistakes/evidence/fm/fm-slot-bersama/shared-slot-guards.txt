@@ -1,0 +1,41 @@
+Adversarial guards - every case below must NOT touch the shared pool slot.
+
+### 1. The other (older) record's pane is ALIVE
+REFUSED: task lp-ae-akses's recorded worktree /private/tmp/fm-g1/pool/1/myob-ae-clone is also task ae-stream-bryan's recorded worktree.
+Returning that pool slot would kill ae-stream-bryan's processes and reset its copy, so nothing was changed - not even with --force.
+Reconcile whichever record is wrong (bin/fm-crew-state.sh lp-ae-akses; bin/fm-crew-state.sh ae-stream-bryan), then re-run teardown.
+  -> slot returned to pool: 0 time(s); slot contents intact: yes; records left: 2
+
+### 2. Relaunch re-stamp: other record carries the LATER stamp, both alive
+REFUSED: task lp-ae-akses's recorded worktree /private/tmp/fm-g2/pool/1/myob-ae-clone is also task ae-stream-bryan's recorded worktree.
+Returning that pool slot would kill ae-stream-bryan's processes and reset its copy, so nothing was changed - not even with --force.
+Reconcile whichever record is wrong (bin/fm-crew-state.sh lp-ae-akses; bin/fm-crew-state.sh ae-stream-bryan), then re-run teardown.
+  -> slot returned to pool: 0 time(s); slot contents intact: yes; records left: 2
+
+### 3. Operator 'reconciles' by APPENDING a corrected worktree= line to the other record
+REFUSED: task lp-ae-akses's recorded worktree /private/tmp/fm-g3/pool/1/myob-ae-clone is also task ae-stream-bryan's recorded worktree.
+Returning that pool slot would kill ae-stream-bryan's processes and reset its copy, so nothing was changed - not even with --force.
+Reconcile whichever record is wrong (bin/fm-crew-state.sh lp-ae-akses; bin/fm-crew-state.sh ae-stream-bryan), then re-run teardown.
+  -> slot returned to pool: 0 time(s); slot contents intact: yes; records left: 2
+
+### 4. Other record names two windows (endpoint binding unprovable) while it is alive
+REFUSED: task lp-ae-akses's recorded worktree /private/tmp/fm-g4/pool/1/myob-ae-clone is also task ae-stream-bryan's recorded worktree.
+Returning that pool slot would kill ae-stream-bryan's processes and reset its copy, so nothing was changed - not even with --force.
+Reconcile whichever record is wrong (bin/fm-crew-state.sh lp-ae-akses; bin/fm-crew-state.sh ae-stream-bryan), then re-run teardown.
+  -> slot returned to pool: 0 time(s); slot contents intact: yes; records left: 2
+
+### 5. Both panes gone, operator tears down the EARLIER record first (refusal must name the order)
+REFUSED: task ae-stream-bryan's recorded worktree /private/tmp/fm-g5/pool/1/myob-ae-clone is also task lp-ae-akses's recorded worktree.
+Returning that pool slot would kill lp-ae-akses's processes and reset its copy, so nothing was changed - not even with --force.
+Both endpoints are already gone, and task lp-ae-akses was spawned after ae-stream-bryan, so tear lp-ae-akses down first and then re-run this teardown for ae-stream-bryan.
+Reconcile whichever record is wrong (bin/fm-crew-state.sh ae-stream-bryan; bin/fm-crew-state.sh lp-ae-akses), then re-run teardown.
+  -> slot returned to pool: 0 time(s); slot contents intact: yes; records left: 2
+  then following the advice - later record first, earlier record second:
+teardown lp-ae-akses complete (window firstmate:fm-lp-ae-akses, worktree /tmp/fm-g5/worktree)
+teardown ae-stream-bryan complete (window firstmate:fm-ae-stream-bryan, worktree /tmp/fm-g5/worktree)
+  -> slot returned to pool: 2 time(s); slot contents intact: yes; records left: 0
+
+### 6. Legacy record with no spawn_gen and a dead pane, beside a stamped record
+warning: task ae-stream-bryan's recorded worktree /private/tmp/fm-g6/pool/1/myob-ae-clone is also task lp-ae-akses's, whose record carries a spawn stamp while ae-stream-bryan's predates them and ae-stream-bryan's endpoint reads 'missing'; that slot is lp-ae-akses's now, so its processes, copy, and claim are left untouched and only ae-stream-bryan's own cleanup runs.
+teardown ae-stream-bryan complete (window firstmate:fm-ae-stream-bryan; pool slot /tmp/fm-g6/worktree left to task lp-ae-akses (home /tmp/fm-g6/home), which it was reassigned to)
+  -> slot returned to pool: 0 time(s); slot contents intact: yes; records left: 1

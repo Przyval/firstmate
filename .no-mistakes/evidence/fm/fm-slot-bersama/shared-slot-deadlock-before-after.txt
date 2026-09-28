@@ -1,0 +1,18 @@
+Fixture: pooled treehouse slot .../myob-ae-clone recorded by BOTH
+  ae-stream-bryan (older scout, spawn_gen s1790221863, tmux window gone)
+  lp-ae-akses     (newer task,   spawn_gen s1790490802, tmux window gone)
+
+================ BEFORE (base 1b82b77) : fm-teardown.sh lp-ae-akses --force ================
+REFUSED: task lp-ae-akses's recorded worktree /private/tmp/fm-ev-before/pool/1/myob-ae-clone is also task ae-stream-bryan's recorded worktree.
+Returning that pool slot would kill ae-stream-bryan's processes and reset its copy, so nothing was changed - not even with --force.
+Reconcile whichever record is wrong (bin/fm-crew-state.sh lp-ae-akses; bin/fm-crew-state.sh ae-stream-bryan), then re-run teardown.
+exit=1 (deadlock: both records survive, task can never be cleaned up)
+records still in state/: ae-stream-bryan.meta lp-ae-akses.meta 
+
+================ AFTER (638a987) : same fixture, same command ================
+warning: task ae-stream-bryan's record also names /private/tmp/fm-ev-after/pool/1/myob-ae-clone, but ae-stream-bryan was spawned before lp-ae-akses and its endpoint reads 'missing'; ae-stream-bryan's record is stale there and does not block this cleanup (tear ae-stream-bryan down to clear it).
+warning: task ae-stream-bryan's record also names /private/tmp/fm-ev-after/pool/1/myob-ae-clone, but ae-stream-bryan was spawned before lp-ae-akses and its endpoint reads 'missing'; ae-stream-bryan's record is stale there and does not block this cleanup (tear ae-stream-bryan down to clear it).
+teardown lp-ae-akses complete (window firstmate:fm-lp-ae-akses, worktree /tmp/fm-ev-after/worktree)
+$ fm-teardown.sh ae-stream-bryan --force
+teardown ae-stream-bryan complete (window firstmate:fm-ae-stream-bryan, worktree /tmp/fm-ev-after/worktree)
+records left in state/: (none)
