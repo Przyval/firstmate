@@ -1138,38 +1138,46 @@ SH
 }
 
 test_two_dead_ends_in_one_sweep_are_reported_once_each() {
-  local home first second out path report entries
-  # One kind of check can reach more than one dead end in a single sweep: two copies
-  # of the same command on PATH that both hang are two unanswered findings of that
-  # tool's command check. Both are conditions of this sweep, so both are said, and
-  # both have to be remembered as said: the cap that keeps one unanswered entry per
-  # kind is about what earlier sweeps left behind, and were it to drop one of these
-  # instead, that one would be reported all over again the next time this check has
-  # an answer.
+  local home mute hung out path report entries
+  # One kind of check can reach more than one dead end in a single sweep: a copy
+  # that answers with no version in it and a copy that never answers at all are two
+  # findings of the same tool's command check, and the hang leaves that check
+  # without an answer, so both wait out the same streak and are said together.
+  # Both then have to be remembered as said: the cap that keeps one unanswered
+  # entry per kind is about what earlier sweeps left behind, and were it to drop
+  # one of these instead, the dropped one would be reported all over again the
+  # moment the check has an answer. The copy with no version in its output is the
+  # one that makes that visible, because that same text is a settled failure once
+  # every copy answers, so a record that forgot it speaks again.
   home=$(make_home twin-dead-ends)
-  first="$TMP_ROOT/twin-dead-ends/first/bin"
-  second="$TMP_ROOT/twin-dead-ends/second/bin"
-  make_slow_copy "$first" "$TOOL" 30
-  make_slow_copy "$second" "$TOOL" 30
+  mute="$TMP_ROOT/twin-dead-ends/mute/bin"
+  hung="$TMP_ROOT/twin-dead-ends/hung/bin"
+  make_copy "$mute" "$TOOL" 'no version here'
+  make_slow_copy "$hung" "$TOOL" 30
   write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
   out="$home/out.txt"
-  path=$(fixture_path "$first:$second")
+  path=$(fixture_path "$mute:$hung")
 
   run_check_until_unanswered "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "$first/$TOOL did not answer in time" "the first hung copy was not reported once the streak ran out"
-  assert_contains "$report" "$second/$TOOL did not answer in time" "the second hung copy was dropped from the report, so only one dead end of the sweep was said"
+  assert_contains "$report" "herdr check failed: $mute/$TOOL did not report a version" "the copy that reported no version was dropped from the report, so only one dead end of the sweep was said"
+  assert_contains "$report" "$hung/$TOOL did not answer in time" "the hung copy was not reported once the streak ran out"
 
-  # Both were said, so neither is news again. The second copy answers from here on,
-  # which gives the check an answer and is the sweep that would repeat the first
-  # copy's hang if the record had only kept one of the two.
-  make_copy "$second" "$TOOL" 'herdr 0.8.2'
-  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
-  assert_not_contains "$(cat "$out")" "$first/$TOOL did not answer in time" "a dead end the sweep had already reported was reported again once the check answered"
-
-  entries=$(grep -o "$first/$TOOL did not answer in time" "$home/state/.tool-updates" | wc -l | tr -d ' ')
+  entries=$(grep -o "$mute/$TOOL did not report a version" "$home/state/.tool-updates" | wc -l | tr -d ' ')
   [ "$entries" = 1 ] \
-    || fail "the still-hanging copy is remembered $entries times instead of once"
+    || fail "the sweep said the copy reported no version but left $entries record entries for it instead of one"
+  entries=$(grep -o "$hung/$TOOL did not answer in time" "$home/state/.tool-updates" | wc -l | tr -d ' ')
+  [ "$entries" = 1 ] \
+    || fail "the sweep said the copy never answered but left $entries record entries for it instead of one"
+
+  # Both were said, so neither is news again. The hung copy answers from here on,
+  # which gives the check an answer and turns the other copy's missing version into
+  # a settled failure - the sweep that repeats it if the record kept only one of
+  # the two findings this check reached.
+  make_copy "$hung" "$TOOL" 'herdr 0.8.2'
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  [ ! -s "$out" ] \
+    || fail "a dead end the sweep had already reported was reported again once the check answered: $(cat "$out")"
   pass "two dead ends in one sweep are each reported once"
 }
 
