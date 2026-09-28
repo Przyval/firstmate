@@ -63,12 +63,15 @@
 # The report record state/.tool-updates is written only when a sweep runs to its
 # end, and it carries every finding already reported, uncut, so the same pending
 # update is reported once rather than on every poll while a new finding that
-# lands past the one-line cut is still news. A tool's reported findings are
-# forgotten only once a sweep finds nothing for it, so a check failure such as an
-# unanswered remote does not erase an update already reported, and a remote that
-# flaps between answering and not reports each finding once. A sweep killed part
-# way through leaves no record and is retried, instead of suppressing its
-# finding.
+# lands past the one-line cut is still news. Each recorded finding carries the
+# tool and the kind of check it came from, and a reported finding is forgotten
+# only once that same kind of check for that same tool reaches a conclusion
+# again. So a check failure such as an unanswered remote does not erase an update
+# already reported, a failing git probe does not erase what the command probe of
+# the same tool reported, and a tool the sweep never reached keeps what it last
+# reported. A condition that clears and later returns, a check failure included,
+# is news again. A sweep killed part way through leaves no record and is retried,
+# instead of suppressing its finding.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -84,7 +87,13 @@ CHECK_ID=tool-updates
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
-RECORD_SCHEMA=fm-tool-updates-v1
+RECORD_SCHEMA=fm-tool-updates-v2
+# One tool record per line of the registry read, and one reported finding per
+# entry of the report record, both built from fields joined with the unit
+# separator rather than a tab, because tab is IFS whitespace and `read` would
+# collapse the empty fields that an optional key or a sweep-wide finding leaves
+# behind.
+FIELD_SEP=$(printf '\037')
 RECORD_TAB=$'\t'
 # Wider than the digest default because one finding names two absolute paths and
 # their two versions, and several tools can report in the same sweep.
@@ -199,22 +208,127 @@ record_epoch_now() {
 real_epoch() { date +%s; }
 
 FINDINGS=
+# One entry per finding, in three parallel arrays because Bash 3.2 has no
+# associative arrays: the finding text, the watched tool it belongs to, and the
+# kind of check that produced it. A sweep-wide finding has no tool.
 FINDING_ITEMS=()
+FINDING_OWNERS=()
+FINDING_KINDS=()
+# The watched tools this sweep read from the registry, and whether the sweep got
+# far enough to check each of them.
 TOOL_NAMES=()
+TOOL_REACHED=()
+# Whether the registry was read at all, so a sweep that could not read it is not
+# taken for a sweep that found nothing to watch.
+REGISTRY_READ=0
+# Per tool and kind of check: whether this sweep's check reached a conclusion. A
+# pair with no entry here was never checked, which is not a conclusion either.
+CHECK_KEYS=()
+CHECK_ANSWERED=()
+# The tool and kind of check the findings being emitted belong to.
+FINDING_OWNER=
+FINDING_KIND=sweep
 DEADLINE=0
 INCOMPLETE_REPORTED=0
 
 # Each finding is flattened to a single line here, because the whole report must
-# stay one line for the wake record.
+# stay one line for the wake record. The two record separators are flattened out
+# with it, so the report record can carry each finding's tool and kind of check
+# alongside its text without any escaping.
 emit() {
   local text
-  text=$(printf '%s' "$1" | tr '\t\r\n' '   ')
+  text=$(printf '%s' "$1" | tr '\t\r\n\037' '    ')
   FINDING_ITEMS+=("$text")
+  FINDING_OWNERS+=("$FINDING_OWNER")
+  FINDING_KINDS+=("$FINDING_KIND")
   if [ -z "$FINDINGS" ]; then
     FINDINGS=$text
   else
     FINDINGS="$FINDINGS; $text"
   fi
+}
+
+# A finding about the sweep itself rather than about one watched tool, whichever
+# tool's check the sweep happens to be inside when it is emitted.
+emit_sweep() {
+  local owner=$FINDING_OWNER kind=$FINDING_KIND
+  FINDING_OWNER=
+  FINDING_KIND=sweep
+  emit "$1"
+  FINDING_OWNER=$owner
+  FINDING_KIND=$kind
+}
+
+# A finding that says this tool's check could not reach a conclusion, so what was
+# reported for it earlier is neither confirmed nor cleared by this sweep.
+emit_failed() {
+  check_kind_unknown
+  emit "$1 check failed: $2"
+}
+
+check_kind_index() {
+  local key=$1 i=0
+  while [ "$i" -lt "${#CHECK_KEYS[@]}" ]; do
+    if [ "${CHECK_KEYS[i]}" = "$key" ]; then
+      printf '%s' "$i"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Marks the check now running as having reached no conclusion. A no-op outside a
+# tool's check, where there is no conclusion to reach.
+check_kind_unknown() {
+  local i
+  i=$(check_kind_index "$FINDING_OWNER$FIELD_SEP$FINDING_KIND") || return 0
+  CHECK_ANSWERED[i]=0
+}
+
+# answered when this sweep's check for the pair reached a conclusion, unknown
+# when it ran without one, and absent when it never ran.
+check_kind_state() {
+  local i
+  i=$(check_kind_index "$1$FIELD_SEP$2") || { printf 'absent'; return 0; }
+  if [ "${CHECK_ANSWERED[i]}" = 1 ]; then
+    printf 'answered'
+  else
+    printf 'unknown'
+  fi
+}
+
+# Runs one kind of check for one tool, with every finding it emits tagged as that
+# tool's and that kind's, so retention never has to read a finding's own text to
+# learn what it was about.
+check_kind() {
+  local kind=$1 name=$2
+  shift 2
+  CHECK_KEYS+=("$name$FIELD_SEP$kind")
+  CHECK_ANSWERED+=(1)
+  FINDING_OWNER=$name
+  FINDING_KIND=$kind
+  "$@"
+  FINDING_OWNER=
+  FINDING_KIND=sweep
+}
+
+# reached when this sweep checked the tool, unreached when the sweep read it from
+# the registry but never got to it, and absent when the registry no longer has it.
+tool_state() {
+  local i=0
+  while [ "$i" -lt "${#TOOL_NAMES[@]}" ]; do
+    if [ "${TOOL_NAMES[i]}" = "$1" ]; then
+      if [ "${TOOL_REACHED[i]}" = 1 ]; then
+        printf 'reached'
+      else
+        printf 'unreached'
+      fi
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  printf 'absent'
 }
 
 budget_exhausted() {
@@ -223,13 +337,15 @@ budget_exhausted() {
 
 # True while the sweep budget still has room for another probe. When it does not,
 # it records once which tool the sweep did not finish, so a sweep that cannot
-# finish says so rather than being killed by the watcher with nothing printed.
+# finish says so rather than being killed by the watcher with nothing printed, and
+# the check it stops inside reaches no conclusion rather than looking like one.
 budget_allows() {
   local name=$1
   budget_exhausted || return 0
+  check_kind_unknown
   if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
     INCOMPLETE_REPORTED=1
-    emit "check incomplete: the time budget ran out before $name"
+    emit_sweep "check incomplete: the time budget ran out before $name"
   fi
   return 1
 }
@@ -369,11 +485,6 @@ config_validate() {
   return 0
 }
 
-# One record per tool, in config order. Fields are joined with the unit
-# separator rather than a tab, because tab is IFS whitespace and `read` would
-# collapse the empty fields that an optional key leaves behind.
-FIELD_SEP=$(printf '\037')
-
 config_records() {
   jq -r '
     .tools[] | [
@@ -427,20 +538,20 @@ command_findings() {
   # This tool's announcement source is dead if its pattern cannot be used, which
   # is reported here, for this tool alone, so the rest of the sweep still runs.
   if [ -n "$announce" ] && ! announce_pattern_usable "$announce"; then
-    emit "$name check failed: announce_pattern is not a usable extended regular expression"
+    emit_failed "$name" "announce_pattern is not a usable extended regular expression"
     announce=
   fi
 
   hits=$(path_hits "$command_name")
   if [ -z "$hits" ]; then
-    emit "$name check failed: $command_name is not on PATH"
+    emit_failed "$name" "$command_name is not on PATH"
     return 0
   fi
 
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     if budget_exhausted; then
-      emit "$name check failed: the time budget ran out before every copy answered"
+      emit_failed "$name" "the time budget ran out before every copy answered"
       break
     fi
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
@@ -473,7 +584,7 @@ EOF
       if budget_exhausted; then
         # The version probe's output cannot carry the announcement, so searching
         # it would present a source that was never asked as a clean result.
-        emit "$name check failed: the time budget ran out before the update announcement was checked"
+        emit_failed "$name" "the time budget ran out before the update announcement was checked"
         announce_out=
       else
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
@@ -482,7 +593,7 @@ EOF
         if [ "$status" -eq 124 ]; then
           # A source that was asked and never answered is not a source that had
           # nothing to say. The one that answers with nothing stays silent below.
-          emit "$name check failed: $resolved_path did not answer when asked for its update announcement"
+          emit_failed "$name" "$resolved_path did not answer when asked for its update announcement"
           announce_out=
         fi
       fi
@@ -493,7 +604,7 @@ EOF
       matched=$(grep -oE -- "$announce" <<< "$announce_out" 2>/dev/null)
       status=$?
       if [ "$status" -gt 1 ]; then
-        emit "$name check failed: announce_pattern is not a usable extended regular expression"
+        emit_failed "$name" "announce_pattern is not a usable extended regular expression"
       elif [ -n "$matched" ]; then
         matched_line=$(printf '%s\n' "$matched" | head -n 1)
         announced_version=$(parse_announced_version "$matched_line")
@@ -510,7 +621,7 @@ EOF
   if [ -z "$resolved_version" ]; then
     # No copy was probed at all when the path is empty, and the budget report
     # already covers that, so do not blame a copy that was never asked.
-    [ -z "$resolved_path" ] || emit "$name check failed: $resolved_path did not report a version"
+    [ -z "$resolved_path" ] || emit_failed "$name" "$resolved_path did not report a version"
     return 0
   fi
 
@@ -520,7 +631,7 @@ EOF
   fi
 
   if [ -n "$unreadable" ]; then
-    emit "$name check failed: $unreadable did not report a version"
+    emit_failed "$name" "$unreadable did not report a version"
   fi
   return 0
 }
@@ -549,11 +660,11 @@ git_probe_answered() {
   local status=$1 name=$2 subject=$3 question=$4
   case "$status" in
     "$GIT_PROBE_NOT_ISSUED")
-      emit "$name check failed: the time budget ran out before $subject was asked $question"
+      emit_failed "$name" "the time budget ran out before $subject was asked $question"
       return 1
       ;;
     124)
-      emit "$name check failed: $subject did not answer $question"
+      emit_failed "$name" "$subject did not answer $question"
       return 1
       ;;
   esac
@@ -569,11 +680,11 @@ git_findings() {
   local status remote_sha local_sha local_label count short symref
 
   if ! command -v git >/dev/null 2>&1; then
-    emit "$name check failed: git is not installed"
+    emit_failed "$name" "git is not installed"
     return 0
   fi
   if [ ! -d "$repo" ]; then
-    emit "$name check failed: $repo is not a directory"
+    emit_failed "$name" "$repo is not a directory"
     return 0
   fi
   budget_allows "$name" || return 0
@@ -581,7 +692,7 @@ git_findings() {
   status=$?
   git_probe_answered "$status" "$name" "$repo" "whether it is a git repository" || return 0
   if [ "$status" -ne 0 ]; then
-    emit "$name check failed: $repo is not a git repository"
+    emit_failed "$name" "$repo is not a git repository"
     return 0
   fi
 
@@ -600,7 +711,7 @@ git_findings() {
       | awk '$1 == "ref:" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
   fi
   if [ -z "$branch" ]; then
-    emit "$name check failed: cannot resolve the default branch of $remote in $repo"
+    emit_failed "$name" "cannot resolve the default branch of $remote in $repo"
     return 0
   fi
 
@@ -611,12 +722,12 @@ git_findings() {
     # The probe itself failed, so nothing at all is known about the branch. An
     # offline host and a deleted branch are different problems, and reporting a
     # missing branch here would name a cause that was never established.
-    emit "$name check failed: $remote could not be reached or read from $repo"
+    emit_failed "$name" "$remote could not be reached or read from $repo"
     return 0
   fi
   remote_sha=$(printf '%s\n' "$remote_sha" | awk 'NR == 1 { print $1 }')
   if [ -z "$remote_sha" ]; then
-    emit "$name check failed: $remote has no branch $branch"
+    emit_failed "$name" "$remote has no branch $branch"
     return 0
   fi
 
@@ -631,7 +742,7 @@ git_findings() {
     local_sha=$(git_probe "$repo" rev-parse --verify --quiet HEAD 2>/dev/null)
     git_probe_answered "$?" "$name" "$repo" "where HEAD points" || return 0
     if [ -z "$local_sha" ]; then
-      emit "$name check failed: $repo has no commit to compare"
+      emit_failed "$name" "$repo has no commit to compare"
       return 0
     fi
     local_label='local HEAD'
@@ -669,12 +780,22 @@ git_findings() {
 # --- report record ----------------------------------------------------------
 
 RECORD_EPOCH=0
-RECORD_REPORTED=
+# The findings the record says were already reported, in three parallel arrays
+# shaped exactly like this sweep's own: text, tool, and kind of check.
+RECORD_TEXTS=()
+RECORD_OWNERS=()
+RECORD_KINDS=()
 
+# Every array is indexed by hand rather than expanded with [@], because an empty
+# array expanded that way is a fatal unbound variable under `set -u` on Bash 3.2,
+# which is still the stock shell on macOS.
 record_read() {
-  local line first=1
+  local line first=1 entry owner kind text i
+  local -a entries=()
   RECORD_EPOCH=0
-  RECORD_REPORTED=
+  RECORD_TEXTS=()
+  RECORD_OWNERS=()
+  RECORD_KINDS=()
   [ -f "$RECORD" ] || return 0
   while IFS= read -r line; do
     if [ "$first" = 1 ]; then
@@ -690,69 +811,92 @@ record_read() {
           *) RECORD_EPOCH=$line ;;
         esac
         ;;
-      reported=*) RECORD_REPORTED=${line#reported=} ;;
+      reported=*)
+        line=${line#reported=}
+        [ -n "$line" ] || continue
+        IFS=$RECORD_TAB read -r -a entries <<< "$line"
+        i=0
+        while [ "$i" -lt "${#entries[@]}" ]; do
+          entry=${entries[i]}
+          i=$((i + 1))
+          IFS=$FIELD_SEP read -r owner kind text <<< "$entry"
+          [ -n "$text" ] || continue
+          RECORD_OWNERS+=("$owner")
+          RECORD_KINDS+=("$kind")
+          RECORD_TEXTS+=("$text")
+        done
+        ;;
     esac
   done < "$RECORD"
   return 0
 }
 
-# Reported findings are recorded tab-separated, since emit flattens tabs out of
-# every finding.
 record_has() {
-  case "$RECORD_TAB$RECORD_REPORTED$RECORD_TAB" in
-    *"$RECORD_TAB$1$RECORD_TAB"*) return 0 ;;
-  esac
+  local i=0
+  while [ "$i" -lt "${#RECORD_TEXTS[@]}" ]; do
+    [ "${RECORD_TEXTS[i]}" = "$1" ] && return 0
+    i=$((i + 1))
+  done
   return 1
 }
 
 findings_are_news() {
-  local item
-  for item in "${FINDING_ITEMS[@]}"; do
-    record_has "$item" || return 0
+  local i=0
+  while [ "$i" -lt "${#FINDING_ITEMS[@]}" ]; do
+    record_has "${FINDING_ITEMS[i]}" || return 0
+    i=$((i + 1))
   done
   return 1
 }
 
-# The watched tool a finding belongs to, or nothing for a sweep-wide finding.
-finding_tool() {
-  local item=$1 name
-  for name in "${TOOL_NAMES[@]}"; do
-    case "$item" in
-      "$name "*) printf '%s' "$name"; return 0 ;;
-    esac
+finding_was_emitted() {
+  local i=0
+  while [ "$i" -lt "${#FINDING_ITEMS[@]}" ]; do
+    [ "${FINDING_ITEMS[i]}" = "$1" ] && return 0
+    i=$((i + 1))
   done
+  return 1
 }
 
-# This sweep's findings, plus each earlier reported finding of a tool that still
-# has a finding now, when either of them is a check failure. A check failure says
-# nothing about what was reported before it, so it keeps that memory; a fresh
-# answer replaces an earlier answer, so the record cannot grow without bound.
+# True when this sweep neither confirmed nor cleared an earlier reported finding,
+# which is decided per tool and per kind of check: the registry was unreadable,
+# the sweep never reached the tool, or that one kind of its checks reached no
+# conclusion. A kind that did answer speaks for its own findings alone, so a
+# failed git probe cannot erase what the command probe reported, or the reverse.
+prior_is_unsettled() {
+  local owner=$1 kind=$2
+  [ "$REGISTRY_READ" = 1 ] || return 0
+  [ -n "$owner" ] || return 1
+  case "$(tool_state "$owner")" in
+    absent) return 1 ;;
+    unreached) return 0 ;;
+  esac
+  case "$(check_kind_state "$owner" "$kind")" in
+    answered|absent) return 1 ;;
+  esac
+  return 0
+}
+
+# This sweep's findings, plus each earlier reported finding it left unsettled. A
+# check that reached no conclusion says nothing about what was reported before it,
+# so it keeps that memory; a check that did answer replaces its own earlier
+# findings, whether they were answers or failures, so a condition that returns
+# later is news again and the record cannot grow without bound.
 findings_to_remember() {
-  local item prior owner out='' kept all_failed
-  local -a priors=()
-  for item in "${FINDING_ITEMS[@]}"; do
-    out="$out${out:+$RECORD_TAB}$item"
+  local i out='' text
+  i=0
+  while [ "$i" -lt "${#FINDING_ITEMS[@]}" ]; do
+    out="$out${out:+$RECORD_TAB}${FINDING_OWNERS[i]}$FIELD_SEP${FINDING_KINDS[i]}$FIELD_SEP${FINDING_ITEMS[i]}"
+    i=$((i + 1))
   done
-  [ -n "$RECORD_REPORTED" ] && IFS=$RECORD_TAB read -r -a priors <<< "$RECORD_REPORTED"
-  for prior in "${priors[@]}"; do
-    [ -n "$prior" ] || continue
-    case "$RECORD_TAB$out$RECORD_TAB" in *"$RECORD_TAB$prior$RECORD_TAB"*) continue ;; esac
-    owner=$(finding_tool "$prior")
-    [ -n "$owner" ] || continue
-    kept=0
-    all_failed=1
-    for item in "${FINDING_ITEMS[@]}"; do
-      case "$item" in
-        "$owner check failed: "*) kept=1 ;;
-        "$owner "*) kept=1; all_failed=0 ;;
-      esac
-    done
-    [ "$kept" = 1 ] || continue
-    case "$prior" in
-      "$owner check failed: "*) ;;
-      *) [ "$all_failed" = 1 ] || continue ;;
-    esac
-    out="$out${out:+$RECORD_TAB}$prior"
+  i=0
+  while [ "$i" -lt "${#RECORD_TEXTS[@]}" ]; do
+    text=${RECORD_TEXTS[i]}
+    if ! finding_was_emitted "$text" \
+      && prior_is_unsettled "${RECORD_OWNERS[i]}" "${RECORD_KINDS[i]}"; then
+      out="$out${out:+$RECORD_TAB}${RECORD_OWNERS[i]}$FIELD_SEP${RECORD_KINDS[i]}$FIELD_SEP$text"
+    fi
+    i=$((i + 1))
   done
   printf '%s' "$out"
 }
@@ -788,18 +932,26 @@ action_check() {
   DEADLINE=$(($(real_epoch) + BUDGET_SECS))
 
   if [ -n "$BUDGET_CUT_FROM" ]; then
-    emit "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
+    emit_sweep "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
   fi
 
   if ! config_validate; then
-    emit "watched tool registry: $CONFIG_PROBLEM"
+    emit_sweep "watched tool registry: $CONFIG_PROBLEM"
   else
+    REGISTRY_READ=1
+    # The registry is read to its end even once the budget is gone, without
+    # probing anything further, so the sweep knows which tools it never reached
+    # and can keep what they last reported instead of forgetting it.
     while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch; do
       [ -n "$name" ] || continue
       TOOL_NAMES+=("$name")
-      budget_allows "$name" || break
-      [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
-      [ -z "$repo" ] || git_findings "$name" "$repo" "$remote" "$branch"
+      if ! budget_allows "$name"; then
+        TOOL_REACHED+=(0)
+        continue
+      fi
+      TOOL_REACHED+=(1)
+      [ -z "$command_name" ] || check_kind command "$name" command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
+      [ -z "$repo" ] || check_kind git "$name" git_findings "$name" "$repo" "$remote" "$branch"
     done < <(config_records)
   fi
 

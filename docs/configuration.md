@@ -1366,8 +1366,10 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 
 **Repeat reporting and inheritance**
 
-- The check prints nothing when everything is current, and `state/.tool-updates` records the findings already reported so the same pending update is reported once instead of on every poll, and a check failure such as an unanswered remote does not make an already reported update news again.
-- A changed or returning condition is reported again.
+- The check prints nothing when everything is current, and `state/.tool-updates` records the findings already reported so the same pending update is reported once instead of on every poll.
+- Each recorded finding carries the tool and the kind of check it came from, and it is forgotten only once that same kind of check for that same tool reaches a conclusion again.
+  So a check failure such as an unanswered remote does not make an already reported update news again, a failing `git` probe does not clear what the `command` probe of the same tool reported, and a tool a truncated sweep never reached keeps what it last reported.
+- A changed or returning condition is reported again, a check failure included: once the remote answers, a later unanswered read is news again.
 - Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 - This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
 

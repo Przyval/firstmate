@@ -774,9 +774,13 @@ SH
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
   [ ! -s "$out" ] || fail "an update already reported was reported again after one unanswered read: $(cat "$out")"
 
+  # The remote answered in between, which cleared the unanswered read, so the
+  # read that fails again is a returning condition and is reported as one. What
+  # must not come back is the update the answering sweep already accounted for.
   touch "$TMP_ROOT/flaky/offline"
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
-  [ ! -s "$out" ] || fail "an unanswered read already reported was reported again: $(cat "$out")"
+  assert_contains "$(cat "$out")" "did not answer" "a returning unanswered read was suppressed as a repeat"
+  assert_not_contains "$(cat "$out")" "update available" "an update already reported came back with the next unanswered read"
 
   rm -f "$TMP_ROOT/flaky/offline"
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
@@ -787,6 +791,127 @@ SH
   run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
   assert_contains "$(cat "$out")" "1 commit behind" "a changed update was suppressed as a repeat"
   pass "a flaky remote does not repeat an update that was already reported"
+}
+
+test_the_record_is_written_under_the_system_shell() {
+  local home stale fresh out path status report
+  # The record is built from arrays, and an empty array expanded with [@] under
+  # `set -u` is a fatal unbound variable on Bash 3.2, which is still the stock
+  # /bin/bash on macOS. That killed the write on the first sweep with a finding,
+  # left the record empty, and made every later poll report the same update
+  # again, so this case runs the check under the system shell rather than
+  # whatever bash runs this suite.
+  if [ ! -x /bin/bash ]; then
+    pass "the system shell case is skipped without /bin/bash"
+    return
+  fi
+  home=$(make_home system-shell)
+  stale="$TMP_ROOT/system-shell/mise/installs/herdr/latest/bin"
+  fresh="$TMP_ROOT/system-shell/local/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$stale:$fresh")
+
+  status=0
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$path" FM_TOOL_UPDATE_INTERVAL=0 \
+    /bin/bash "$CHECK" check >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "system shell first sweep exit"
+  report=$(cat "$out")
+  assert_contains "$report" "herdr update not in effect" "the system shell sweep did not report the PATH skew"
+  assert_not_contains "$report" "unbound variable" "the system shell sweep tripped over an empty array"
+
+  status=0
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$path" FM_TOOL_UPDATE_INTERVAL=0 \
+    /bin/bash "$CHECK" check >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "system shell second sweep exit"
+  [ ! -s "$out" ] || fail "the system shell could not record its first sweep, so the same update was reported again: $(cat "$out")"
+  pass "the report record is written under the system shell as well"
+}
+
+test_one_failing_check_kind_keeps_what_the_other_kind_reported() {
+  local home work stale fresh dir out path report
+  # A tool watched through both a command and a git remote has two independent
+  # checks. An unanswered remote says nothing about what the command probe found,
+  # and nothing about the git update that was already reported either, so the
+  # command probe still answering must not be read as a sweep that settled the
+  # tool and cleared its git memory.
+  home=$(make_home mixed)
+  work=$(git_fixture mixed-repo)
+  git -C "$work" reset -q --hard HEAD~2
+  stale="$TMP_ROOT/mixed/mise/installs/herdr/latest/bin"
+  fresh="$TMP_ROOT/mixed/local/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+
+  # A git whose network read stalls whenever the flag file exists.
+  dir="$TMP_ROOT/mixed/bin"
+  mkdir -p "$dir"
+  cat > "$dir/git" <<SH
+#!/usr/bin/env bash
+if [ -e '$TMP_ROOT/mixed/offline' ]; then
+  for arg in "\$@"; do
+    if [ "\$arg" = ls-remote ]; then
+      sleep 30
+      exit 0
+    fi
+  done
+fi
+exec $(command -v git) "\$@"
+SH
+  chmod 0755 "$dir/git"
+  path=$(fixture_path "$dir:$stale:$fresh")
+
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
+  report=$(cat "$out")
+  assert_contains "$report" "herdr update not in effect" "the first sweep did not report the PATH skew"
+  assert_contains "$report" "herdr update available: local main is 2 commits behind origin/main" "the first sweep did not report the pending git update"
+
+  touch "$TMP_ROOT/mixed/offline"
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
+  report=$(cat "$out")
+  assert_contains "$report" "herdr check failed: origin did not answer" "the unanswered read was not reported"
+  assert_not_contains "$report" "update available" "an unanswered read reported an update it never established"
+
+  rm -f "$TMP_ROOT/mixed/offline"
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=2
+  [ ! -s "$out" ] || fail "a git update already reported came back because the command probe of the same tool still answered: $(cat "$out")"
+  pass "one kind of check failing keeps what the other kind of the same tool reported"
+}
+
+test_a_truncated_sweep_keeps_what_the_tools_it_missed_reported() {
+  local home first stale fresh out path
+  # A sweep that runs out of budget never reaches the tools after the cut, which
+  # says nothing about what they last reported. Forgetting them there would make
+  # their still-pending updates news again on the next full sweep, which is the
+  # repeat this record exists to prevent.
+  home=$(make_home truncated)
+  first="$TMP_ROOT/truncated/first/bin"
+  stale="$TMP_ROOT/truncated/mise/installs/herdr/latest/bin"
+  fresh="$TMP_ROOT/truncated/local/bin"
+  make_copy "$first" "$TOOL-a" 'first 1.0.0'
+  make_copy "$stale" "$TOOL-b" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL-b" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"first\",\"command\":\"$TOOL-a\"},{\"name\":\"herdr\",\"command\":\"$TOOL-b\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$first:$stale:$fresh")
+
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "herdr update not in effect" "the first sweep did not report the PATH skew"
+
+  # The first tool now hangs and spends the whole budget, so the second tool is
+  # never reached.
+  make_slow_copy "$first" "$TOOL-a" 30
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  assert_contains "$(cat "$out")" "check incomplete: the time budget ran out before herdr" "the truncated sweep did not say which tool it never reached"
+
+  make_copy "$first" "$TOOL-a" 'first 1.0.0'
+  run_check "$home" "$path" "$out"
+  [ ! -s "$out" ] || fail "a sweep that ran out of budget forgot a tool it never reached, so its update was reported again: $(cat "$out")"
+  pass "a sweep truncated by its budget keeps what the tools it never reached reported"
 }
 
 test_an_overlong_report_says_it_was_cut() {
@@ -849,7 +974,7 @@ test_probes_are_skipped_between_intervals() {
   FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$now" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "first cadence run exit"
-  assert_grep 'fm-tool-updates-v1' "$home/state/.tool-updates" "the first run did not record its sweep"
+  assert_grep 'fm-tool-updates-v2' "$home/state/.tool-updates" "the first run did not record its sweep"
 
   # A finding appears, but the interval has not elapsed, so no probe runs.
   make_copy "$dir" "$TOOL" 'no version here'
@@ -1139,6 +1264,9 @@ test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
 test_a_flaky_remote_does_not_repeat_a_reported_update
+test_the_record_is_written_under_the_system_shell
+test_one_failing_check_kind_keeps_what_the_other_kind_reported
+test_a_truncated_sweep_keeps_what_the_tools_it_missed_reported
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals
