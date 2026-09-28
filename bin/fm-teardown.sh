@@ -111,7 +111,11 @@
 # stamps on one record, or neither record stamped - and every endpoint reading
 # that does not corroborate the order (a stale side reading alive or unknown, or
 # an earlier-stamped record whose own endpoint is not dead or missing) still
-# refuse even with --force.
+# refuse even with --force. An endpoint reading is evidence only from a record
+# whose metadata provably binds that endpoint to that task - the same validation
+# this teardown's own endpoint passes; a record that states two windows, two
+# worktrees, or an endpoint bound to another task reads 'unverified' and settles
+# nothing, as does a record that does not state exactly one kind.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2378,6 +2382,31 @@ record_has_no_spawn_stamp() {  # <meta>
   [ "$(record_spawn_stamp_count "$1")" = 0 ]
 }
 
+# Endpoint state of a task record, read only through the same binding
+# validation every other endpoint in this file passes: exactly one window,
+# worktree, project and backend, and an endpoint that provably belongs to that
+# task. A record that cannot prove it names its own endpoint proves nothing
+# about a slot, so its state reads 'unverified' and corroborates neither side.
+record_validated_agent_state() {  # <meta> <id>
+  fm_backend_validate_task_endpoint "$1" "$2" 2>/dev/null || {
+    printf 'unverified'
+    return 0
+  }
+  fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET"
+}
+
+# Kind of a record, reported as secondmate whenever the record does not state
+# exactly one, so an ambiguously typed record never reaches slot resolution.
+record_exclusive_kind() {  # <meta>
+  local count
+  count=$(grep -c '^kind=' "$1" 2>/dev/null || true)
+  case "$count" in
+    0) return 0 ;;
+    1) fm_meta_get "$1" kind ;;
+    *) printf 'secondmate' ;;
+  esac
+}
+
 record_spawn_epoch() {  # <meta>
   local gen epoch count
   count=$(record_spawn_stamp_count "$1") || return 1
@@ -2420,7 +2449,7 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
-        other_kind=$(fm_meta_get "$other" kind)
+        other_kind=$(record_exclusive_kind "$other")
         if [ "$field" = worktree ] && [ "$other_kind" != secondmate ]; then
           # This task's own claim proves outright that the other record on the
           # slot is stale. Without a claim, spawn_gen is only a tie-breaker on
@@ -2441,7 +2470,7 @@ require_exclusive_worktree_slot_record() {
           fi
           if [ "$claim" = absent ] && [ -n "$own_epoch" ] && [ -n "$other_epoch" ] &&
              [ "$other_epoch" -lt "$own_epoch" ]; then
-            other_endpoint=$(fm_backend_agent_state "$(fm_backend_of_meta "$other")" "$(fm_backend_target_of_meta "$other")")
+            other_endpoint=$(record_validated_agent_state "$other" "$other_id")
             case "$other_endpoint" in
               dead|missing)
                 echo "warning: task $other_id's record also names $slot, but $other_id was spawned before $record_id and its endpoint reads '$other_endpoint'; $other_id's record is stale there and does not block this cleanup (tear $other_id down to clear it)." >&2
@@ -2451,7 +2480,7 @@ require_exclusive_worktree_slot_record() {
           fi
           if [ "$claim" = absent ] && [ -n "$own_epoch" ] && [ -z "$other_epoch" ] &&
              record_has_no_spawn_stamp "$other"; then
-            other_endpoint=$(fm_backend_agent_state "$(fm_backend_of_meta "$other")" "$(fm_backend_target_of_meta "$other")")
+            other_endpoint=$(record_validated_agent_state "$other" "$other_id")
             case "$other_endpoint" in
               dead|missing)
                 echo "warning: task $other_id's record also names $slot, but it predates spawn stamps while $record_id's record carries one and $other_id's endpoint reads '$other_endpoint'; $other_id's record is stale there and does not block this cleanup (tear $other_id down to clear it)." >&2
@@ -2461,7 +2490,7 @@ require_exclusive_worktree_slot_record() {
           fi
           if [ "$claim" = absent ] && [ -z "$own_epoch" ] && [ -n "$other_epoch" ] &&
              record_has_no_spawn_stamp "$record_meta"; then
-            own_endpoint=$(fm_backend_agent_state "$(fm_backend_of_meta "$record_meta")" "$(fm_backend_target_of_meta "$record_meta")")
+            own_endpoint=$(record_validated_agent_state "$record_meta" "$record_id")
             case "$own_endpoint" in
               dead|missing)
                 FM_TREEHOUSE_SLOT_OWNER_ID=$other_id
@@ -2473,8 +2502,8 @@ require_exclusive_worktree_slot_record() {
           fi
           if [ "$claim" = absent ] && [ -n "$own_epoch" ] && [ -n "$other_epoch" ] &&
              [ "$other_epoch" -gt "$own_epoch" ]; then
-            other_endpoint=$(fm_backend_agent_state "$(fm_backend_of_meta "$other")" "$(fm_backend_target_of_meta "$other")")
-            own_endpoint=$(fm_backend_agent_state "$(fm_backend_of_meta "$record_meta")" "$(fm_backend_target_of_meta "$record_meta")")
+            other_endpoint=$(record_validated_agent_state "$other" "$other_id")
+            own_endpoint=$(record_validated_agent_state "$record_meta" "$record_id")
             case "$other_endpoint:$own_endpoint" in
               alive:dead|alive:missing)
                 FM_TREEHOUSE_SLOT_OWNER_ID=$other_id

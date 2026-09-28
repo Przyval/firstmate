@@ -1217,6 +1217,60 @@ SH
   assert_refused_without_mutation "$dir" "$new" "shared slot whose unstamped record is live"
   assert_refused_without_mutation "$dir" "$old" "live unstamped record on a shared slot"
 
+  # An endpoint reading is only evidence when the record it came from provably
+  # names its own endpoint. A hand-appended second window= line makes the last
+  # value win, so the reading would be 'missing' for a task that is alive under
+  # its real window - the slot must not be returned out from under it.
+  dir=$(make_case slot-shared-other-window-ambiguous)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" "$old"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "window=firstmate:fm-$old-ghost" \
+    "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose other record names two windows"
+  assert_present "$dir/home/state/$old.meta" "the refused teardown removed the ambiguous record"
+
+  # Same rule for a binding that names another task: the reading proves nothing
+  # about the record that carries it.
+  dir=$(make_case slot-shared-other-binding-foreign)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=someone-else" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose other record is bound to a third task"
+
+  # The unstamped direction reads the same evidence, so it is gated the same way.
+  dir=$(make_case slot-shared-unstamped-window-ambiguous)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" "$old"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "window=firstmate:fm-$old-ghost" \
+    "endpoint_task_id=$old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose unstamped record names two windows"
+
+  # A record that does not state exactly one kind cannot be typed out of the
+  # collision either: the last-value read would call a secondmate a scout.
+  dir=$(make_case slot-shared-other-kind-ambiguous)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=secondmate" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose other record states two kinds"
+
   pass "fm-teardown: two task records on one pool slot resolve by handout order instead of refusing each other"
 }
 
