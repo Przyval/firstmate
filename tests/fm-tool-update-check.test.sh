@@ -793,6 +793,64 @@ SH
   pass "a flaky remote does not repeat an update that was already reported"
 }
 
+test_a_failure_the_probe_answered_does_not_swallow_a_returning_finding() {
+  local home stale fresh out path
+  # A command that is no longer on PATH is an answer, not a missing one: the
+  # sweep read PATH and found nothing there. So it settles that tool's command
+  # check the way a clean sweep does, and the skew that returns afterwards is a
+  # returning condition, which must be reported again rather than suppressed as a
+  # repeat of the report from before the tool went away.
+  home=$(make_home answered-failure)
+  stale="$TMP_ROOT/answered-failure/mise/installs/herdr/latest/bin"
+  fresh="$TMP_ROOT/answered-failure/local/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$stale:$fresh")
+
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "herdr update not in effect" "the first sweep did not report the PATH skew"
+
+  rm -f "$stale/$TOOL" "$fresh/$TOOL"
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "herdr check failed: $TOOL is not on PATH" "the uninstalled tool was not reported as absent from PATH"
+
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "herdr update not in effect" "the returning skew was swallowed as a repeat of the report from before the tool was uninstalled"
+  pass "a check failure the probe answered settles its kind, so a returning finding is news again"
+}
+
+test_a_copy_that_never_answered_keeps_what_it_reported() {
+  local home stale fresh out path
+  # The other half of the same distinction: a copy that runs out its bound
+  # answered nothing at all, so it must not settle the command check and clear
+  # the skew already reported. The message is the same either way, so only the
+  # memory tells them apart.
+  home=$(make_home unanswered-copy)
+  stale="$TMP_ROOT/unanswered-copy/mise/installs/herdr/latest/bin"
+  fresh="$TMP_ROOT/unanswered-copy/local/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$stale:$fresh")
+
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_contains "$(cat "$out")" "herdr update not in effect" "the first sweep did not report the PATH skew"
+
+  make_slow_copy "$stale" "$TOOL" 30
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  assert_contains "$(cat "$out")" "herdr check failed: $stale/$TOOL did not report a version" "a copy that never answered was not reported"
+
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  [ ! -s "$out" ] || fail "a copy that never answered erased the skew already reported, so it was reported again: $(cat "$out")"
+  pass "a copy that never answered keeps what its tool's command check reported"
+}
+
 test_the_record_is_written_under_the_system_shell() {
   local home stale fresh out path status report
   # The record is built from arrays, and an empty array expanded with [@] under
@@ -1264,6 +1322,8 @@ test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
 test_a_flaky_remote_does_not_repeat_a_reported_update
+test_a_failure_the_probe_answered_does_not_swallow_a_returning_finding
+test_a_copy_that_never_answered_keeps_what_it_reported
 test_the_record_is_written_under_the_system_shell
 test_one_failing_check_kind_keeps_what_the_other_kind_reported
 test_a_truncated_sweep_keeps_what_the_tools_it_missed_reported

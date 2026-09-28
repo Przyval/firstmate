@@ -66,10 +66,13 @@
 # lands past the one-line cut is still news. Each recorded finding carries the
 # tool and the kind of check it came from, and a reported finding is forgotten
 # only once that same kind of check for that same tool reaches a conclusion
-# again. So a check failure such as an unanswered remote does not erase an update
-# already reported, a failing git probe does not erase what the command probe of
-# the same tool reported, and a tool the sweep never reached keeps what it last
-# reported. A condition that clears and later returns, a check failure included,
+# again. What is no conclusion at all is exactly no answer: a probe that ran out
+# its bound, a remote that could not be read, a budget that ran out, a tool the
+# sweep never reached. Those keep the memory, so an unanswered remote does not
+# erase an update already reported, and a git remote that cannot be read does not
+# erase what the command probe of the same tool answered. A failure the probe did
+# answer, such as a command that is no longer on PATH, is a conclusion and settles
+# that kind like any clean sweep does. A condition that clears and later returns
 # is news again. A sweep killed part way through leaves no record and is retried,
 # instead of suppressing its finding.
 set -u
@@ -259,9 +262,18 @@ emit_sweep() {
   FINDING_KIND=$kind
 }
 
-# A finding that says this tool's check could not reach a conclusion, so what was
-# reported for it earlier is neither confirmed nor cleared by this sweep.
+# A check failure the probe did answer: the command is not on PATH, the directory
+# is not a repository, the remote has no such branch. The check reached a
+# conclusion, so it settles what it reported before exactly as a clean sweep does,
+# and a condition that returns later is news again.
 emit_failed() {
+  emit "$1 check failed: $2"
+}
+
+# A check failure that is no answer at all: a probe that hit its bound, a remote
+# that could not be read, a budget that ran out. Nothing was established, so what
+# was reported for this kind of check earlier is neither confirmed nor cleared.
+emit_unanswered() {
   check_kind_unknown
   emit "$1 check failed: $2"
 }
@@ -532,8 +544,8 @@ probe_output() {
 command_findings() {
   local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5
   local hit out version matched announce_out status matched_line announced_version
-  local resolved_path='' resolved_version='' resolved_out=''
-  local best_path='' best_version='' unreadable='' hits=''
+  local resolved_path='' resolved_version='' resolved_out='' resolved_answered=1
+  local best_path='' best_version='' unreadable='' unreadable_answered=1 hits=''
 
   # This tool's announcement source is dead if its pattern cannot be used, which
   # is reported here, for this tool alone, so the rest of the sweep still runs.
@@ -551,19 +563,24 @@ command_findings() {
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     if budget_exhausted; then
-      emit_failed "$name" "the time budget ran out before every copy answered"
+      emit_unanswered "$name" "the time budget ran out before every copy answered"
       break
     fi
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
     out=$(probe_output "$hit" $args_joined)
+    status=$?
     version=$(parse_version "$out")
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit
       resolved_version=$version
       resolved_out=$out
+      [ "$status" -ne 124 ] || resolved_answered=0
     fi
     if [ -z "$version" ]; then
-      [ -n "$unreadable" ] || unreadable=$hit
+      if [ -z "$unreadable" ]; then
+        unreadable=$hit
+        [ "$status" -ne 124 ] || unreadable_answered=0
+      fi
       continue
     fi
     if [ -z "$best_version" ] || version_newer "$version" "$best_version"; then
@@ -584,7 +601,7 @@ EOF
       if budget_exhausted; then
         # The version probe's output cannot carry the announcement, so searching
         # it would present a source that was never asked as a clean result.
-        emit_failed "$name" "the time budget ran out before the update announcement was checked"
+        emit_unanswered "$name" "the time budget ran out before the update announcement was checked"
         announce_out=
       else
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
@@ -593,7 +610,7 @@ EOF
         if [ "$status" -eq 124 ]; then
           # A source that was asked and never answered is not a source that had
           # nothing to say. The one that answers with nothing stays silent below.
-          emit_failed "$name" "$resolved_path did not answer when asked for its update announcement"
+          emit_unanswered "$name" "$resolved_path did not answer when asked for its update announcement"
           announce_out=
         fi
       fi
@@ -620,8 +637,17 @@ EOF
 
   if [ -z "$resolved_version" ]; then
     # No copy was probed at all when the path is empty, and the budget report
-    # already covers that, so do not blame a copy that was never asked.
-    [ -z "$resolved_path" ] || emit_failed "$name" "$resolved_path did not report a version"
+    # already covers that, so do not blame a copy that was never asked. A copy
+    # that ran out its bound answered nothing, while one that answered without a
+    # version did answer, and only the first leaves this check without a
+    # conclusion.
+    if [ -n "$resolved_path" ]; then
+      if [ "$resolved_answered" = 1 ]; then
+        emit_failed "$name" "$resolved_path did not report a version"
+      else
+        emit_unanswered "$name" "$resolved_path did not report a version"
+      fi
+    fi
     return 0
   fi
 
@@ -631,7 +657,11 @@ EOF
   fi
 
   if [ -n "$unreadable" ]; then
-    emit_failed "$name" "$unreadable did not report a version"
+    if [ "$unreadable_answered" = 1 ]; then
+      emit_failed "$name" "$unreadable did not report a version"
+    else
+      emit_unanswered "$name" "$unreadable did not report a version"
+    fi
   fi
   return 0
 }
@@ -660,11 +690,11 @@ git_probe_answered() {
   local status=$1 name=$2 subject=$3 question=$4
   case "$status" in
     "$GIT_PROBE_NOT_ISSUED")
-      emit_failed "$name" "the time budget ran out before $subject was asked $question"
+      emit_unanswered "$name" "the time budget ran out before $subject was asked $question"
       return 1
       ;;
     124)
-      emit_failed "$name" "$subject did not answer $question"
+      emit_unanswered "$name" "$subject did not answer $question"
       return 1
       ;;
   esac
@@ -722,7 +752,7 @@ git_findings() {
     # The probe itself failed, so nothing at all is known about the branch. An
     # offline host and a deleted branch are different problems, and reporting a
     # missing branch here would name a cause that was never established.
-    emit_failed "$name" "$remote could not be reached or read from $repo"
+    emit_unanswered "$name" "$remote could not be reached or read from $repo"
     return 0
   fi
   remote_sha=$(printf '%s\n' "$remote_sha" | awk 'NR == 1 { print $1 }')
@@ -860,9 +890,10 @@ finding_was_emitted() {
 
 # True when this sweep neither confirmed nor cleared an earlier reported finding,
 # which is decided per tool and per kind of check: the registry was unreadable,
-# the sweep never reached the tool, or that one kind of its checks reached no
-# conclusion. A kind that did answer speaks for its own findings alone, so a
-# failed git probe cannot erase what the command probe reported, or the reverse.
+# the sweep never reached the tool, or that one kind of its checks got no answer
+# at all. A kind that did answer speaks for its own findings alone, so an
+# unanswered git probe cannot erase what the command probe answered, or the
+# reverse.
 prior_is_unsettled() {
   local owner=$1 kind=$2
   [ "$REGISTRY_READ" = 1 ] || return 0
@@ -878,9 +909,9 @@ prior_is_unsettled() {
 }
 
 # This sweep's findings, plus each earlier reported finding it left unsettled. A
-# check that reached no conclusion says nothing about what was reported before it,
-# so it keeps that memory; a check that did answer replaces its own earlier
-# findings, whether they were answers or failures, so a condition that returns
+# check that got no answer says nothing about what was reported before it, so it
+# keeps that memory; a check that did answer replaces its own earlier findings,
+# whether those were updates or failures it answered, so a condition that returns
 # later is news again and the record cannot grow without bound.
 findings_to_remember() {
   local i out='' text
