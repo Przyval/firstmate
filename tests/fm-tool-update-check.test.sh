@@ -618,7 +618,7 @@ test_git_probes_stop_when_the_sweep_budget_is_gone() {
   make_slow_copy "$slow" "$TOOL" 30
   write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"command\":\"$TOOL\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
   out="$home/out.txt"
-  run_check "$home" "$(fixture_path "$slow")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  run_check_until_unanswered "$home" "$(fixture_path "$slow")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
   report=$(cat "$out")
   assert_contains "$report" "check incomplete: the time budget ran out before firstmate" "a sweep with no budget left did not say which tool it did not finish"
   assert_not_contains "$report" "commits behind" "the git probes ran after the sweep budget was already gone"
@@ -1257,6 +1257,74 @@ SH
   pass "one kind of check failing keeps what the other kind of the same tool reported"
 }
 
+test_a_marginal_sweep_budget_does_not_wake_on_every_other_poll() {
+  local home first second out path i
+  # A host whose sweep budget only sometimes suffices is the same flap as a
+  # flaky remote, one level up: the sweep that ran out of time established
+  # nothing the operator can act on, so it waits for its own three-sweep streak
+  # instead of speaking every time it happens.
+  home=$(make_home marginal)
+  first="$TMP_ROOT/marginal/first/bin"
+  second="$TMP_ROOT/marginal/second/bin"
+  make_copy "$first" "$TOOL-a" 'first 1.0.0'
+  make_copy "$second" "$TOOL-b" 'second 2.0.0'
+  write_config "$home" "{\"tools\":[{\"name\":\"first\",\"command\":\"$TOOL-a\"},{\"name\":\"second\",\"command\":\"$TOOL-b\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$first:$second")
+
+  run_check "$home" "$path" "$out"
+  [ ! -s "$out" ] || fail "the baseline sweep had something to report: $(cat "$out")"
+
+  for i in 1 2; do
+    # The first tool hangs, so the budget is gone before the second tool is
+    # reached, and then it answers again on the next poll.
+    make_slow_copy "$first" "$TOOL-a" 30
+    run_check "$home" "$path" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+    [ ! -s "$out" ] || fail "sweep $i that ran out of time woke the operator on its own: $(cat "$out")"
+    make_copy "$first" "$TOOL-a" 'first 1.0.0'
+    run_check "$home" "$path" "$out"
+    [ ! -s "$out" ] || fail "the sweep after truncated sweep $i reported something: $(cat "$out")"
+  done
+  pass "a sweep budget that only sometimes runs out does not wake the operator every other poll"
+}
+
+test_a_budget_that_ends_the_copy_loop_reports_no_update() {
+  local home out path dirs dir i version
+  # A copy loop can also be cut short by the sweep budget rather than by a probe
+  # bound: the copies after the cut are never asked at all, so the newest one on
+  # PATH may be among them and the comparison is just as incomplete. No update may
+  # be reported from it.
+  home=$(make_home loop-budget)
+  path=
+  dirs=
+  for i in 1 2 3 4 5 6; do
+    dir="$TMP_ROOT/loop-budget/copy-$i/bin"
+    mkdir -p "$dir"
+    # Every copy answers well inside its own bound, so none of them times out;
+    # together they outlast the sweep budget, which is what ends the loop.
+    version=0.8.$i
+    [ "$i" != 6 ] || version=0.9.0
+    cat > "$dir/$TOOL" <<SH
+#!/usr/bin/env bash
+sleep 0.4
+printf 'herdr $version\n'
+SH
+    chmod 0755 "$dir/$TOOL"
+    dirs="${dirs:+$dirs:}$dir"
+  done
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$dirs")
+
+  # The report of the streak's last sweep names the tool the sweep never finished,
+  # which is what proves the budget ended the loop rather than a probe bound.
+  run_check_until_unanswered "$home" "$path" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1 FM_TOOL_UPDATE_PROBE_SECS=5
+  assert_contains "$(cat "$out")" "herdr check failed: the time budget ran out before every copy answered" "the budget did not end the copy loop, so this case proves nothing"
+  assert_not_contains "$(cat "$out")" "update not in effect" "a loop the budget ended claimed to know the newest copy on PATH"
+  assert_not_contains "$(cat "$out")" "update available" "a loop the budget ended claimed to know an available update"
+  pass "a copy loop the sweep budget ended reports no update from its incomplete comparison"
+}
+
 test_a_truncated_sweep_keeps_what_the_tools_it_missed_reported() {
   local home first stale fresh out path
   # A sweep that runs out of budget never reaches the tools after the cut, which
@@ -1280,7 +1348,7 @@ test_a_truncated_sweep_keeps_what_the_tools_it_missed_reported() {
   # The first tool now hangs and spends the whole budget, so the second tool is
   # never reached.
   make_slow_copy "$first" "$TOOL-a" 30
-  run_check "$home" "$path" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  run_check_until_unanswered "$home" "$path" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
   assert_contains "$(cat "$out")" "check incomplete: the time budget ran out before herdr" "the truncated sweep did not say which tool it never reached"
 
   make_copy "$first" "$TOOL-a" 'first 1.0.0'
@@ -1651,6 +1719,8 @@ test_repeated_unanswered_sweeps_keep_one_failure_per_check
 test_the_record_is_written_under_the_system_shell
 test_one_failing_check_kind_keeps_what_the_other_kind_reported
 test_a_truncated_sweep_keeps_what_the_tools_it_missed_reported
+test_a_marginal_sweep_budget_does_not_wake_on_every_other_poll
+test_a_budget_that_ends_the_copy_loop_reports_no_update
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals

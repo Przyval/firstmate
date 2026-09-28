@@ -81,10 +81,13 @@
 # A check that has no answer also says nothing the operator can act on, so it is
 # not reported for its own sake: a remote flapping between answering and not would
 # wake them on every failing poll. It is reported once a kind has gone unanswered
-# three sweeps in a row, once per such streak, and an answer ends the streak. What
-# a check with no answer must never do is claim to know an update: a command check
-# whose copies did not all answer reports no update at all that sweep, because the
-# comparison it would rest on is incomplete.
+# three sweeps in a row, once per such streak, and an answer ends the streak. A
+# sweep that runs out of time before it reached every tool counts as such a check
+# of its own, so a budget that is marginal does not wake anyone every other poll
+# either. What a check with no answer must never do is claim to know an update: a
+# command check that did not hear from every copy on PATH, whether a probe was cut
+# short or the budget ended the loop before the last copies were asked, reports no
+# update at all that sweep, because the comparison it would rest on is incomplete.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -276,7 +279,13 @@ emit() {
 }
 
 # A finding about the sweep itself rather than about one watched tool, whichever
-# tool's check the sweep happens to be inside when it is emitted.
+# tool's check the sweep happens to be inside when it is emitted. The sweep running
+# out of time is a transient of the sweep as a whole, so for that one the sweep
+# counts as a check of its own, under an owner no watched tool name can spell,
+# which is what lets it be remembered and reported through the same streak as one
+# tool's unanswered check.
+SWEEP_OWNER='the sweep'
+
 emit_sweep() {
   local owner=$FINDING_OWNER kind=$FINDING_KIND
   FINDING_OWNER=
@@ -284,6 +293,28 @@ emit_sweep() {
   emit "$1"
   FINDING_OWNER=$owner
   FINDING_KIND=$kind
+}
+
+emit_sweep_no_answer() {
+  local owner=$FINDING_OWNER kind=$FINDING_KIND
+  FINDING_OWNER=$SWEEP_OWNER
+  FINDING_KIND=sweep
+  emit_no_answer "$1"
+  FINDING_OWNER=$owner
+  FINDING_KIND=$kind
+}
+
+# A finding that is no answer at all: a probe cut short, a remote that could not be
+# read, a budget that ran out. Nothing was established, so what this check reported
+# earlier is neither confirmed nor cleared, and the finding itself waits for its
+# streak before it is worth a word.
+emit_no_answer() {
+  check_kind_unknown
+  FINDING_CLASS=unanswered
+  FINDING_STREAK=$(unanswered_streak "$FINDING_OWNER" "$FINDING_KIND")
+  emit "$1"
+  FINDING_CLASS=answer
+  FINDING_STREAK=0
 }
 
 # A check failure. Which class it becomes follows from what its check already
@@ -295,21 +326,15 @@ emit_sweep() {
 emit_failed() {
   if [ "$(check_kind_state "$FINDING_OWNER" "$FINDING_KIND")" = answered ]; then
     FINDING_CLASS=failure
+    emit "$1 check failed: $2"
+    FINDING_CLASS=answer
   else
-    FINDING_CLASS=unanswered
-    FINDING_STREAK=$(unanswered_streak "$FINDING_OWNER" "$FINDING_KIND")
+    emit_no_answer "$1 check failed: $2"
   fi
-  emit "$1 check failed: $2"
-  FINDING_CLASS=answer
-  FINDING_STREAK=0
 }
 
-# A check failure that is no answer at all: a probe cut short, a remote that could
-# not be read, a budget that ran out. Nothing was established, so what was
-# reported for this kind of check earlier is neither confirmed nor cleared.
 emit_unanswered() {
-  check_kind_unknown
-  emit_failed "$1" "$2"
+  emit_no_answer "$1 check failed: $2"
 }
 
 check_kind_index() {
@@ -324,8 +349,13 @@ check_kind_index() {
   return 1
 }
 
+check_kind_begins() {
+  CHECK_KEYS+=("$1$FIELD_SEP$2")
+  CHECK_ANSWERED+=(1)
+}
+
 # Marks the check now running as having reached no conclusion. A no-op outside a
-# tool's check, where there is no conclusion to reach.
+# check that has begun, where there is no conclusion to reach.
 check_kind_unknown() {
   local i
   i=$(check_kind_index "$FINDING_OWNER$FIELD_SEP$FINDING_KIND") || return 0
@@ -350,8 +380,7 @@ check_kind_state() {
 check_kind() {
   local kind=$1 name=$2
   shift 2
-  CHECK_KEYS+=("$name$FIELD_SEP$kind")
-  CHECK_ANSWERED+=(1)
+  check_kind_begins "$name" "$kind"
   FINDING_OWNER=$name
   FINDING_KIND=$kind
   "$@"
@@ -391,7 +420,7 @@ budget_allows() {
   check_kind_unknown
   if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
     INCOMPLETE_REPORTED=1
-    emit_sweep "check incomplete: the time budget ran out before $name"
+    emit_sweep_no_answer "check incomplete: the time budget ran out before $name"
   fi
   return 1
 }
@@ -597,6 +626,7 @@ command_findings() {
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     if budget_exhausted; then
+      cut_short=1
       emit_unanswered "$name" "the time budget ran out before every copy answered"
       break
     fi
@@ -622,8 +652,9 @@ command_findings() {
 $hits
 EOF
 
-  # Any copy whose probe was cut short leaves the comparison between the copies
-  # incomplete, whichever copy it was, so this check reached no conclusion at all.
+  # Any copy the loop did not hear from leaves the comparison between the copies
+  # incomplete, whether its probe was cut short or the budget ended the loop before
+  # it was asked at all, so this check reached no conclusion.
   # It still reports what it could not read, below, but it reports no update from
   # an incomplete comparison: neither the announcement it found nor the skew
   # between the copies that did answer.
@@ -966,11 +997,13 @@ finding_was_emitted() {
 prior_is_unsettled() {
   local owner=$1 kind=$2
   [ "$REGISTRY_READ" = 1 ] || return 0
-  [ -n "$owner" ] || return 1
-  case "$(tool_state "$owner")" in
-    absent) return 1 ;;
-    unreached) return 0 ;;
-  esac
+  if [ "$owner" != "$SWEEP_OWNER" ]; then
+    [ -n "$owner" ] || return 1
+    case "$(tool_state "$owner")" in
+      absent) return 1 ;;
+      unreached) return 0 ;;
+    esac
+  fi
   case "$(check_kind_state "$owner" "$kind")" in
     answered|absent) return 1 ;;
   esac
@@ -1057,6 +1090,7 @@ action_check() {
   fi
 
   DEADLINE=$(($(real_epoch) + BUDGET_SECS))
+  check_kind_begins "$SWEEP_OWNER" sweep
 
   if [ -n "$BUDGET_CUT_FROM" ]; then
     emit_sweep "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
